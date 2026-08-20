@@ -69,3 +69,16 @@ with a `◆` marker plus an amber fill and border. It has the same filename and 
 `.mmd` extension and is written alongside the JSON.
 Without `--output`, the report is named
 `<scan-dir-basename>.<unix-timestamp>.topo.json` in the workspace.
+
+## Local viewer
+
+Browse a report with the built-in local web viewer:
+
+```sh
+topo view zenpayroll.123.topo.json
+```
+
+It opens a browser at an ephemeral `127.0.0.1` address and serves only that
+report. The viewer provides a searchable directory tree, target/sprinkle
+filters, summary counts, and matching-line detail. Use `--no-open` to print
+the URL without launching a browser.

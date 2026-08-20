@@ -13,6 +13,8 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+mod viewer;
+
 const FORMAT_VERSION: u8 = 5;
 static STATUS_ACTIVE: AtomicBool = AtomicBool::new(false);
 
@@ -22,6 +24,12 @@ struct Options {
     output: Option<PathBuf>,
     scan_directory: Option<PathBuf>,
     mode: Option<MapMode>,
+}
+
+#[derive(Debug)]
+struct ViewOptions {
+    report: PathBuf,
+    open_browser: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
@@ -124,7 +132,18 @@ fn main() {
         print!("{}", main_help());
         return;
     }
-    if let Err(error) = run(arguments) {
+    if arguments.first().is_some_and(|argument| argument == "view")
+        && matches!(arguments.get(1).map(String::as_str), Some("--help" | "-h"))
+    {
+        print!("{}", view_help());
+        return;
+    }
+    let result = if arguments.first().is_some_and(|argument| argument == "view") {
+        run_view(arguments)
+    } else {
+        run(arguments)
+    };
+    if let Err(error) = result {
         clear_status();
         eprintln!("topo: {error}");
         std::process::exit(1);
@@ -249,6 +268,36 @@ fn run(arguments: Vec<String>) -> Result<(), String> {
     Ok(())
 }
 
+fn run_view(arguments: Vec<String>) -> Result<(), String> {
+    let options = parse_view_args(arguments)?;
+    viewer::run(options.report, options.open_browser)
+}
+
+fn parse_view_args(args: Vec<String>) -> Result<ViewOptions, String> {
+    let mut args = args.into_iter();
+    match args.next().as_deref() {
+        Some("view") => {}
+        _ => return Err(view_usage()),
+    }
+    let report = args.next().ok_or_else(view_usage)?;
+    let mut open_browser = true;
+    for argument in args {
+        match argument.as_str() {
+            "--no-open" => open_browser = false,
+            _ => {
+                return Err(format!(
+                    "unexpected argument `{argument}`\n\n{}",
+                    view_usage()
+                ));
+            }
+        }
+    }
+    Ok(ViewOptions {
+        report: PathBuf::from(report),
+        open_browser,
+    })
+}
+
 fn parse_args(args: Vec<String>) -> Result<Options, String> {
     let mut args = args.into_iter();
     match args.next().as_deref() {
@@ -300,9 +349,17 @@ fn parse_args(args: Vec<String>) -> Result<Options, String> {
 
 fn main_help() -> String {
     format!(
-        "████████╗ ██████╗ ██████╗  ██████╗\n╚══██╔══╝██╔═══██╗██╔══██╗██╔═══██╗\n   ██║   ██║   ██║██████╔╝██║   ██║\n   ██║   ██║   ██║██╔═══╝ ██║   ██║\n   ██║   ╚██████╔╝██║     ╚██████╔╝\n   ╚═╝    ╚═════╝ ╚═╝      ╚═════╝\n\n  Code topology maps  •  v{}\n\nUSAGE\n  topo map [<regex>] [--dir <scan-directory>] [--mode <mode>] [--output <filename>]\n\nCOMMANDS\n  map       Search Git-tracked code and write JSON + Mermaid maps\n\nWORKSPACE\n  topo map                 Use the pattern and directory in topo.toml\n  topo map 'UserService'   Override the configured regex\n\nOPTIONS\n  --mode <mode>            all (default), filenames, contents, or sprinkles\n  -h, --help               Show this help\n",
+        "████████╗ ██████╗ ██████╗  ██████╗\n╚══██╔══╝██╔═══██╗██╔══██╗██╔═══██╗\n   ██║   ██║   ██║██████╔╝██║   ██║\n   ██║   ██║   ██║██╔═══╝ ██║   ██║\n   ██║   ╚██████╔╝██║     ╚██████╔╝\n   ╚═╝    ╚═════╝ ╚═╝      ╚═════╝\n\n  Code topology maps  •  v{}\n\nUSAGE\n  topo map [<regex>] [--dir <scan-directory>] [--mode <mode>] [--output <filename>]\n\nCOMMANDS\n  map       Search Git-tracked code and write JSON + Mermaid maps\n  view      Browse a JSON map in a local web viewer\n\nWORKSPACE\n  topo map                 Use the pattern and directory in topo.toml\n  topo map 'UserService'   Override the configured regex\n\nOPTIONS\n  --mode <mode>            all (default), filenames, contents, or sprinkles\n  -h, --help               Show this help\n",
         env!("CARGO_PKG_VERSION")
     )
+}
+
+fn view_help() -> String {
+    "Usage: topo view <report.topo.json> [--no-open]\n\nStart a local web viewer for a topo JSON report. The browser opens automatically; use --no-open to print the URL without opening it.\n".to_owned()
+}
+
+fn view_usage() -> String {
+    "Usage: topo view <report.topo.json> [--no-open]".to_owned()
 }
 
 fn usage() -> String {
