@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     env, fs,
-    io::{self, Write},
+    io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
     process::{Command, ExitStatus},
     time::{SystemTime, UNIX_EPOCH},
@@ -164,7 +164,7 @@ fn run() -> Result<(), String> {
             workspace_directory: workspace_directory.display().to_string(),
             repository_root: repository_root.display().to_string(),
             scan_directory: scan_directory.display().to_string(),
-            regex: pattern,
+            regex: pattern.clone(),
             searched_at_unix_seconds,
             matcher: "ripgrep",
             file_selection: "git ls-files --cached, filtered through Git ignore rules, workspace .topoignore, and available working-tree files",
@@ -188,9 +188,11 @@ fn run() -> Result<(), String> {
     clear_status();
     let home = env::var_os("HOME").map(PathBuf::from);
     println!(
-        "󰈤  {} occurrences in {} files",
+        "󰈤  {} occurrences in {} files  󰗄 {}  󰉋 {}",
         format_number(report.matches.len()),
-        format_number(report.files.len())
+        format_number(report.files.len()),
+        pattern,
+        display_path(&scan_directory, &workspace_directory, home.as_deref())
     );
     println!(
         "󰈙  {}",
@@ -786,12 +788,18 @@ fn status_progress(label: &str, completed: usize, total: usize) {
 }
 
 fn status(message: &str) {
+    if io::stderr().is_terminal() {
+        eprint!("\x1b[?25l");
+    }
     eprint!("\r\x1b[2K{message}");
     let _ = io::stderr().flush();
 }
 
 fn clear_status() {
     eprint!("\r\x1b[2K");
+    if io::stderr().is_terminal() {
+        eprint!("\x1b[?25h");
+    }
     let _ = io::stderr().flush();
 }
 
