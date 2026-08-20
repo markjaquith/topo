@@ -133,21 +133,17 @@ fn run() -> Result<(), String> {
         .strip_prefix(&repository_root)
         .map_err(|_| "the scan directory must be inside the repository root".to_owned())?;
 
-    status("Listing tracked files");
+    status_working("Listing tracked files");
     let tracked_files = tracked_files(&repository_root, scope)?;
-    status("Filtering ignored files");
     let tracked_files = filter_ignored_files(&repository_root, tracked_files)?;
-    status("Applying workspace exclusions");
     let tracked_files = filter_topoignored_files(
         &repository_root,
         &scan_directory,
         &workspace_directory,
         tracked_files,
     )?;
-    status("Checking tracked files are available");
     let tracked_files = filter_available_files(&repository_root, tracked_files);
 
-    status(&format!("Searching {} tracked files", tracked_files.len()));
     let matches = search(&repository_root, &pattern, &tracked_files)?;
 
     let mut matches_by_file: BTreeMap<String, usize> = BTreeMap::new();
@@ -155,20 +151,8 @@ fn run() -> Result<(), String> {
         *matches_by_file.entry(occurrence.file.clone()).or_default() += 1;
     }
 
-    status(&format!(
-        "Extracting imports from {} matching files",
-        matches_by_file.len()
-    ));
-    let files = matches_by_file
-        .iter()
-        .map(|(path, match_count)| FileResult {
-            path: path.clone(),
-            match_count: *match_count,
-            imports: extract_imports(&repository_root.join(path)),
-        })
-        .collect::<Vec<_>>();
+    let files = extract_file_results(&repository_root, &matches_by_file);
 
-    status("Constructing graph");
     let graph = build_graph(&files);
     let searched_at_unix_seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -196,7 +180,7 @@ fn run() -> Result<(), String> {
     });
     let mermaid_output = output.with_extension("mmd");
 
-    status("Writing report");
+    status_working("Writing report");
     write_report(&output, &report)?;
     fs::write(&mermaid_output, mermaid(&report.graph))
         .map_err(|error| format!("could not write {}: {error}", mermaid_output.display()))?;
@@ -357,11 +341,14 @@ fn filter_ignored_files(
     repository_root: &Path,
     files: Vec<PathBuf>,
 ) -> Result<Vec<PathBuf>, String> {
+    let total = files.len();
+    status_progress("Filtering Git ignores", 0, total);
+    let mut processed = 0;
     let mut ignored = BTreeSet::new();
     for batch in path_batches(&files) {
         let output = Command::new("git")
             .args(["check-ignore", "--no-index", "--"])
-            .args(batch)
+            .args(&batch)
             .current_dir(repository_root)
             .output()
             .map_err(|error| format!("could not check ignore rules: {error}"))?;
@@ -377,6 +364,8 @@ fn filter_ignored_files(
                 .filter(|path| !path.is_empty())
                 .map(PathBuf::from),
         );
+        processed += batch.len();
+        status_progress("Filtering Git ignores", processed, total);
     }
     Ok(files
         .into_iter()
@@ -390,8 +379,11 @@ fn filter_topoignored_files(
     workspace_directory: &Path,
     files: Vec<PathBuf>,
 ) -> Result<Vec<PathBuf>, String> {
+    let total = files.len();
+    status_progress("Applying workspace exclusions", 0, total);
     let ignore_path = workspace_directory.join(".topoignore");
     if !ignore_path.is_file() {
+        status_progress("Applying workspace exclusions", total, total);
         return Ok(files);
     }
 
@@ -402,24 +394,40 @@ fn filter_topoignored_files(
     let matcher = builder
         .build()
         .map_err(|error| format!("could not parse {}: {error}", ignore_path.display()))?;
-    Ok(files
-        .into_iter()
-        .filter(|path| {
-            !matcher
-                .matched_path_or_any_parents(repository_root.join(path), false)
-                .is_ignore()
-        })
-        .collect())
+    let mut included = Vec::with_capacity(total);
+    for (index, path) in files.into_iter().enumerate() {
+        if !matcher
+            .matched_path_or_any_parents(repository_root.join(&path), false)
+            .is_ignore()
+        {
+            included.push(path);
+        }
+        if should_refresh_progress(index + 1, total) {
+            status_progress("Applying workspace exclusions", index + 1, total);
+        }
+    }
+    Ok(included)
 }
 
 fn filter_available_files(repository_root: &Path, files: Vec<PathBuf>) -> Vec<PathBuf> {
-    files
-        .into_iter()
-        .filter(|path| repository_root.join(path).is_file())
-        .collect()
+    let total = files.len();
+    status_progress("Checking files are available", 0, total);
+    let mut available = Vec::with_capacity(total);
+    for (index, path) in files.into_iter().enumerate() {
+        if repository_root.join(&path).is_file() {
+            available.push(path);
+        }
+        if should_refresh_progress(index + 1, total) {
+            status_progress("Checking files are available", index + 1, total);
+        }
+    }
+    available
 }
 
 fn search(repository_root: &Path, pattern: &str, files: &[PathBuf]) -> Result<Vec<Match>, String> {
+    let total = files.len();
+    status_progress("Searching", 0, total);
+    let mut processed = 0;
     let mut matches = Vec::new();
     for batch in path_batches(files) {
         let mut command = Command::new("rg");
@@ -433,13 +441,15 @@ fn search(repository_root: &Path, pattern: &str, files: &[PathBuf]) -> Result<Ve
             ])
             .arg(pattern)
             .arg("--")
-            .args(batch)
+            .args(&batch)
             .current_dir(repository_root);
         let output = command
             .output()
             .map_err(|error| format!("could not run ripgrep: {error}"))?;
         validate_rg_status(&output.status, &output.stderr)?;
         matches.extend(parse_rg_output(&output.stdout)?);
+        processed += batch.len();
+        status_progress("Searching", processed, total);
     }
     Ok(matches)
 }
@@ -596,13 +606,35 @@ fn import_patterns(path: &Path) -> Vec<(&'static str, Regex)> {
         .collect()
 }
 
+fn extract_file_results(
+    repository_root: &Path,
+    matches_by_file: &BTreeMap<String, usize>,
+) -> Vec<FileResult> {
+    let total = matches_by_file.len();
+    status_progress("Extracting imports", 0, total);
+    let mut files = Vec::with_capacity(total);
+    for (index, (path, match_count)) in matches_by_file.iter().enumerate() {
+        files.push(FileResult {
+            path: path.clone(),
+            match_count: *match_count,
+            imports: extract_imports(&repository_root.join(path)),
+        });
+        if should_refresh_progress(index + 1, total) {
+            status_progress("Extracting imports", index + 1, total);
+        }
+    }
+    files
+}
+
 fn build_graph(files: &[FileResult]) -> Graph {
+    let total = files.len();
+    status_progress("Constructing graph", 0, total);
     let mut nodes = Vec::new();
     let mut edges = Vec::new();
     let mut import_nodes = BTreeSet::new();
     let mut edge_keys = BTreeSet::new();
 
-    for file in files {
+    for (index, file) in files.iter().enumerate() {
         nodes.push(Node {
             id: file_node_id(&file.path),
             kind: "file",
@@ -612,6 +644,9 @@ fn build_graph(files: &[FileResult]) -> Graph {
         for import in &file.imports {
             import_nodes.insert(import.specifier.clone());
             edge_keys.insert((file_node_id(&file.path), import_node_id(&import.specifier)));
+        }
+        if should_refresh_progress(index + 1, total) {
+            status_progress("Constructing graph", index + 1, total);
         }
     }
     for specifier in import_nodes {
@@ -722,6 +757,34 @@ fn default_filename(search_directory: &Path, timestamp: u64) -> String {
     format!("{basename}.{timestamp}.topo.json")
 }
 
+fn should_refresh_progress(completed: usize, total: usize) -> bool {
+    if total == 0 || completed == total {
+        return true;
+    }
+    completed.saturating_mul(100) / total != completed.saturating_sub(1).saturating_mul(100) / total
+}
+
+fn status_working(message: &str) {
+    status(&format!("󰄬  {message}"));
+}
+
+fn status_progress(label: &str, completed: usize, total: usize) {
+    const BAR_WIDTH: usize = 16;
+    let completed = completed.min(total);
+    let (percentage, filled) = if total == 0 {
+        (100, BAR_WIDTH)
+    } else {
+        (completed * 100 / total, completed * BAR_WIDTH / total)
+    };
+    let bar = format!("{}{}", "█".repeat(filled), "░".repeat(BAR_WIDTH - filled));
+    let unit = if total == 1 { "file" } else { "files" };
+    status(&format!(
+        "󰄬  {label}  {bar}  {percentage:>3}%  {} / {} {unit}",
+        format_number(completed),
+        format_number(total),
+    ));
+}
+
 fn status(message: &str) {
     eprint!("\r\x1b[2K{message}");
     let _ = io::stderr().flush();
@@ -818,6 +881,14 @@ mod tests {
             default_filename(Path::new("/work/topo"), 42),
             "topo.42.topo.json"
         );
+    }
+
+    #[test]
+    fn progress_refreshes_at_percentage_boundaries() {
+        assert!(should_refresh_progress(0, 0));
+        assert!(!should_refresh_progress(1, 200));
+        assert!(should_refresh_progress(2, 200));
+        assert!(should_refresh_progress(200, 200));
     }
 
     #[test]

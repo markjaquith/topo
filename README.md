@@ -32,7 +32,9 @@ topo map 'AdminUser' --dir ~/workspace/zenpayroll
 ```
 
 Without `topo.toml`, topo preserves the original behavior: the positional regex
-is required and the current directory is scanned.
+is required and the current directory is scanned. Topo updates one stderr
+progress line for each phase; file-based phases show completed files and a
+progress bar.
 
 ## Workspace exclusions
 
