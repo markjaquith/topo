@@ -718,14 +718,45 @@ fn write_report(path: &Path, report: &Report) -> Result<(), String> {
     fs::write(path, json).map_err(|error| format!("could not write {}: {error}", path.display()))
 }
 
+#[derive(Default)]
+struct DirectoryTree<'a> {
+    directories: BTreeMap<String, DirectoryTree<'a>>,
+    files: Vec<&'a Node>,
+}
+
 fn mermaid(graph: &Graph) -> String {
     let mut result = String::from("flowchart LR\n");
-    let mut node_names = BTreeMap::new();
-    for (index, node) in graph.nodes.iter().enumerate() {
-        let name = format!("N{index}");
-        let label = node.label.replace('"', "#quot;");
-        result.push_str(&format!("    {name}[\"{label}\"]\n"));
-        node_names.insert(&node.id, name);
+    let node_names = graph
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| (node.id.clone(), format!("N{index}")))
+        .collect::<BTreeMap<_, _>>();
+
+    let mut directories = DirectoryTree::default();
+    let mut imports = Vec::new();
+    for node in &graph.nodes {
+        if node.kind == "file" {
+            insert_file_node(&mut directories, node);
+        } else {
+            imports.push(node);
+        }
+    }
+
+    let mut next_directory_id = 0;
+    write_directory_tree(
+        &mut result,
+        &directories,
+        &node_names,
+        &mut next_directory_id,
+        1,
+    );
+    if !imports.is_empty() {
+        result.push_str("    subgraph Imports[\"Imports\"]\n");
+        for node in imports {
+            write_mermaid_node(&mut result, node, &node_names, 2, &node.label);
+        }
+        result.push_str("    end\n");
     }
     for edge in &graph.edges {
         // Edges only reference nodes constructed above.
@@ -735,6 +766,62 @@ fn mermaid(graph: &Graph) -> String {
         ));
     }
     result
+}
+
+fn insert_file_node<'a>(tree: &mut DirectoryTree<'a>, node: &'a Node) {
+    let path_parts = node.label.split('/').collect::<Vec<_>>();
+    let (directories, _) = path_parts.split_at(path_parts.len().saturating_sub(1));
+    let mut current = tree;
+    for directory in directories {
+        current = current
+            .directories
+            .entry((*directory).to_owned())
+            .or_default();
+    }
+    current.files.push(node);
+}
+
+fn write_directory_tree(
+    result: &mut String,
+    tree: &DirectoryTree<'_>,
+    node_names: &BTreeMap<String, String>,
+    next_directory_id: &mut usize,
+    indent: usize,
+) {
+    for node in &tree.files {
+        let label = node.label.rsplit('/').next().unwrap_or(&node.label);
+        write_mermaid_node(result, node, node_names, indent, label);
+    }
+    for (directory, child) in &tree.directories {
+        let directory_id = format!("D{next_directory_id}");
+        *next_directory_id += 1;
+        let padding = "    ".repeat(indent);
+        result.push_str(&format!(
+            "{padding}subgraph {directory_id}[\"{}\"]\n",
+            mermaid_label(directory)
+        ));
+        write_directory_tree(result, child, node_names, next_directory_id, indent + 1);
+        result.push_str(&format!("{padding}end\n"));
+    }
+}
+
+fn write_mermaid_node(
+    result: &mut String,
+    node: &Node,
+    node_names: &BTreeMap<String, String>,
+    indent: usize,
+    label: &str,
+) {
+    let padding = "    ".repeat(indent);
+    result.push_str(&format!(
+        "{padding}{}[\"{}\"]\n",
+        node_names[&node.id],
+        mermaid_label(label)
+    ));
+}
+
+fn mermaid_label(label: &str) -> String {
+    label.replace('"', "#quot;")
 }
 
 fn display_path(path: &Path, current_directory: &Path, home: Option<&Path>) -> String {
@@ -931,6 +1018,53 @@ mod tests {
             default_filename(Path::new("/work/topo"), 42),
             "topo.42.topo.json"
         );
+    }
+
+    #[test]
+    fn mermaid_nests_files_at_every_directory_level() {
+        let graph = Graph {
+            nodes: vec![
+                Node {
+                    id: "file:packs/payments/app/client.rb".to_owned(),
+                    kind: "file",
+                    label: "packs/payments/app/client.rb".to_owned(),
+                    match_count: Some(1),
+                },
+                Node {
+                    id: "file:packs/payments/lib/helper.rb".to_owned(),
+                    kind: "file",
+                    label: "packs/payments/lib/helper.rb".to_owned(),
+                    match_count: Some(1),
+                },
+                Node {
+                    id: "file:src/main.rs".to_owned(),
+                    kind: "file",
+                    label: "src/main.rs".to_owned(),
+                    match_count: Some(1),
+                },
+                Node {
+                    id: "import:faraday".to_owned(),
+                    kind: "import",
+                    label: "faraday".to_owned(),
+                    match_count: None,
+                },
+            ],
+            edges: vec![Edge {
+                source: "file:packs/payments/app/client.rb".to_owned(),
+                target: "import:faraday".to_owned(),
+                kind: "imports",
+            }],
+        };
+
+        let diagram = mermaid(&graph);
+        assert!(diagram.contains("subgraph D0[\"packs\"]"));
+        assert!(diagram.contains("subgraph D1[\"payments\"]"));
+        assert!(diagram.contains("subgraph D2[\"app\"]"));
+        assert!(diagram.contains("subgraph D3[\"lib\"]"));
+        assert!(diagram.contains("subgraph D4[\"src\"]"));
+        assert!(diagram.contains("subgraph Imports[\"Imports\"]"));
+        assert!(diagram.contains("N0[\"client.rb\"]"));
+        assert!(diagram.contains("N3[\"faraday\"]"));
     }
 
     #[test]
