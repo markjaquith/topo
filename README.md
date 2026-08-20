@@ -31,6 +31,17 @@ overrides:
 topo map 'AdminUser' --dir ~/workspace/zenpayroll
 ```
 
+## Map modes
+
+`--mode` controls whether the regex selects basenames, contents, or both:
+
+| Mode | Selected files |
+| --- | --- |
+| `all` (default) | Matching basenames and content matches |
+| `filenames` | Matching basenames only; skips the content search |
+| `contents` | Content matches only; basenames are not considered |
+| `sprinkles` | Content matches whose basename does not match |
+
 Without `topo.toml`, topo preserves the original behavior: the positional regex
 is required and the current directory is scanned. Topo updates one stderr
 progress line for each phase; file-based phases show completed files and a
