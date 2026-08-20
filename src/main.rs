@@ -13,7 +13,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-const FORMAT_VERSION: u8 = 2;
+const FORMAT_VERSION: u8 = 3;
 static STATUS_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug)]
@@ -65,20 +65,11 @@ struct Match {
 struct FileResult {
     path: String,
     match_count: usize,
-    imports: Vec<Import>,
-}
-
-#[derive(Clone, Serialize)]
-struct Import {
-    specifier: String,
-    kind: String,
-    line: usize,
 }
 
 #[derive(Serialize)]
 struct Graph {
     nodes: Vec<Node>,
-    edges: Vec<Edge>,
 }
 
 #[derive(Serialize)]
@@ -87,13 +78,6 @@ struct Node {
     kind: &'static str,
     label: String,
     match_count: Option<usize>,
-}
-
-#[derive(Serialize)]
-struct Edge {
-    source: String,
-    target: String,
-    kind: &'static str,
 }
 
 fn main() {
@@ -166,7 +150,7 @@ fn run(arguments: Vec<String>) -> Result<(), String> {
         *matches_by_file.entry(occurrence.file.clone()).or_default() += 1;
     }
 
-    let files = extract_file_results(&repository_root, &matches_by_file);
+    let files = collect_file_results(&matches_by_file);
 
     let graph = build_graph(&files);
     let searched_at_unix_seconds = SystemTime::now()
@@ -567,91 +551,17 @@ fn parse_rg_output(output: &[u8]) -> Result<Vec<Match>, String> {
     Ok(matches)
 }
 
-fn extract_imports(path: &Path) -> Vec<Import> {
-    let Ok(contents) = fs::read_to_string(path) else {
-        return Vec::new();
-    };
-
-    let regexes = import_patterns(path);
-
-    let mut imports = BTreeSet::new();
-    for (index, line) in contents.lines().enumerate() {
-        for (kind, regex) in &regexes {
-            if let Some(captures) = regex.captures(line) {
-                let specifier = captures[1].trim().to_owned();
-                if !specifier.is_empty() {
-                    imports.insert((specifier, (*kind).to_owned(), index + 1));
-                }
-            }
-        }
-    }
-    imports
-        .into_iter()
-        .map(|(specifier, kind, line)| Import {
-            specifier,
-            kind,
-            line,
-        })
-        .collect()
-}
-
-fn import_patterns(path: &Path) -> Vec<(&'static str, Regex)> {
-    let extension = path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .unwrap_or_default();
-    let patterns: &[(&str, &str)] = match extension {
-        "rs" => &[("rust_use", r"^\s*(?:pub(?:\([^)]*\))?\s+)?use\s+([^;]+);")],
-        "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" => &[
-            (
-                "javascript_import",
-                r#"^\s*import\s+(?:.+?\s+from\s+)?[\"']([^\"']+)[\"']"#,
-            ),
-            (
-                "javascript_require",
-                r#"\brequire\(\s*[\"']([^\"']+)[\"']\s*\)"#,
-            ),
-        ],
-        "py" => &[
-            ("python_from", r"^\s*from\s+([A-Za-z_][\w.]*)\s+import\s+"),
-            (
-                "python_import",
-                r"^\s*import\s+([A-Za-z_][\w.]*)(?:\s*(?:as\s+\w+)?\s*(?:,|$))",
-            ),
-        ],
-        "go" => &[("go_import", r#"^\s*(?:import\s+)?\"([^\"]+)\""#)],
-        "rb" => &[(
-            "ruby_require",
-            r#"^\s*require(?:_relative)?\s*[\( ]\s*[\"']([^\"']+)[\"']"#,
-        )],
-        _ => &[],
-    };
-    patterns
-        .iter()
-        .map(|(kind, pattern)| {
-            (
-                *kind,
-                Regex::new(pattern).expect("valid built-in import regex"),
-            )
-        })
-        .collect()
-}
-
-fn extract_file_results(
-    repository_root: &Path,
-    matches_by_file: &BTreeMap<String, usize>,
-) -> Vec<FileResult> {
+fn collect_file_results(matches_by_file: &BTreeMap<String, usize>) -> Vec<FileResult> {
     let total = matches_by_file.len();
-    status_progress("Extracting imports", 0, total);
+    status_progress("Collecting matching files", 0, total);
     let mut files = Vec::with_capacity(total);
     for (index, (path, match_count)) in matches_by_file.iter().enumerate() {
         files.push(FileResult {
             path: path.clone(),
             match_count: *match_count,
-            imports: extract_imports(&repository_root.join(path)),
         });
         if should_refresh_progress(index + 1, total) {
-            status_progress("Extracting imports", index + 1, total);
+            status_progress("Collecting matching files", index + 1, total);
         }
     }
     files
@@ -660,11 +570,7 @@ fn extract_file_results(
 fn build_graph(files: &[FileResult]) -> Graph {
     let total = files.len();
     status_progress("Constructing graph", 0, total);
-    let mut nodes = Vec::new();
-    let mut edges = Vec::new();
-    let mut import_nodes = BTreeSet::new();
-    let mut edge_keys = BTreeSet::new();
-
+    let mut nodes = Vec::with_capacity(total);
     for (index, file) in files.iter().enumerate() {
         nodes.push(Node {
             id: file_node_id(&file.path),
@@ -672,38 +578,15 @@ fn build_graph(files: &[FileResult]) -> Graph {
             label: file.path.clone(),
             match_count: Some(file.match_count),
         });
-        for import in &file.imports {
-            import_nodes.insert(import.specifier.clone());
-            edge_keys.insert((file_node_id(&file.path), import_node_id(&import.specifier)));
-        }
         if should_refresh_progress(index + 1, total) {
             status_progress("Constructing graph", index + 1, total);
         }
     }
-    for specifier in import_nodes {
-        nodes.push(Node {
-            id: import_node_id(&specifier),
-            kind: "import",
-            label: specifier,
-            match_count: None,
-        });
-    }
-    for (source, target) in edge_keys {
-        edges.push(Edge {
-            source,
-            target,
-            kind: "imports",
-        });
-    }
-    Graph { nodes, edges }
+    Graph { nodes }
 }
 
 fn file_node_id(path: &str) -> String {
     format!("file:{path}")
-}
-
-fn import_node_id(specifier: &str) -> String {
-    format!("import:{specifier}")
 }
 
 fn write_report(path: &Path, report: &Report) -> Result<(), String> {
@@ -734,13 +617,8 @@ fn mermaid(graph: &Graph) -> String {
         .collect::<BTreeMap<_, _>>();
 
     let mut directories = DirectoryTree::default();
-    let mut imports = Vec::new();
     for node in &graph.nodes {
-        if node.kind == "file" {
-            insert_file_node(&mut directories, node);
-        } else {
-            imports.push(node);
-        }
+        insert_file_node(&mut directories, node);
     }
 
     let mut next_directory_id = 0;
@@ -751,20 +629,6 @@ fn mermaid(graph: &Graph) -> String {
         &mut next_directory_id,
         1,
     );
-    if !imports.is_empty() {
-        result.push_str("    subgraph Imports[\"Imports\"]\n");
-        for node in imports {
-            write_mermaid_node(&mut result, node, &node_names, 2, &node.label);
-        }
-        result.push_str("    end\n");
-    }
-    for edge in &graph.edges {
-        // Edges only reference nodes constructed above.
-        result.push_str(&format!(
-            "    {} -->|{}| {}\n",
-            node_names[&edge.source], edge.kind, node_names[&edge.target]
-        ));
-    }
     result
 }
 
@@ -937,25 +801,6 @@ mod tests {
     }
 
     #[test]
-    fn extracts_imports_for_the_file_language() {
-        let directory = env::temp_dir().join("topo-imports-test");
-        fs::create_dir_all(&directory).unwrap();
-        let cases = [
-            ("example.rs", "use std::fs;", "std::fs"),
-            ("example.ts", "import x from 'package';", "package"),
-            ("example.py", "from tools.util import run", "tools.util"),
-        ];
-        for (filename, contents, expected) in cases {
-            let path = directory.join(filename);
-            fs::write(&path, contents).unwrap();
-            let imports = extract_imports(&path);
-            assert_eq!(imports.len(), 1);
-            assert_eq!(imports[0].specifier, expected);
-        }
-        fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
     fn workspace_config_is_strictly_validated() {
         let directory = env::temp_dir().join(format!("topo-config-test-{}", std::process::id()));
         fs::create_dir_all(&directory).unwrap();
@@ -1042,18 +887,7 @@ mod tests {
                     label: "src/main.rs".to_owned(),
                     match_count: Some(1),
                 },
-                Node {
-                    id: "import:faraday".to_owned(),
-                    kind: "import",
-                    label: "faraday".to_owned(),
-                    match_count: None,
-                },
             ],
-            edges: vec![Edge {
-                source: "file:packs/payments/app/client.rb".to_owned(),
-                target: "import:faraday".to_owned(),
-                kind: "imports",
-            }],
         };
 
         let diagram = mermaid(&graph);
@@ -1062,9 +896,8 @@ mod tests {
         assert!(diagram.contains("subgraph D2[\"app\"]"));
         assert!(diagram.contains("subgraph D3[\"lib\"]"));
         assert!(diagram.contains("subgraph D4[\"src\"]"));
-        assert!(diagram.contains("subgraph Imports[\"Imports\"]"));
         assert!(diagram.contains("N0[\"client.rb\"]"));
-        assert!(diagram.contains("N3[\"faraday\"]"));
+        assert!(!diagram.contains("-->"));
     }
 
     #[test]

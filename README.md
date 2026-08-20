@@ -50,10 +50,8 @@ db/schema.rb
 ```
 
 The report JSON contains the workspace directory, scan directory, repository
-root, regex, timestamp, every occurrence, matching files, extracted imports,
-and graph nodes/edges. A Mermaid sidecar with the same filename and a `.mmd`
-extension is written alongside it. Without `--output`, the report is named
+root, regex, timestamp, every occurrence, matching files, and directory graph
+nodes. The Mermaid sidecar groups matching files by every directory level. It
+has the same filename and a `.mmd` extension and is written alongside the JSON.
+Without `--output`, the report is named
 `<scan-dir-basename>.<unix-timestamp>.topo.json` in the workspace.
-
-Import extraction currently recognizes Rust, JavaScript/TypeScript, Python, Go,
-and Ruby source files.
