@@ -6,14 +6,33 @@ current directory where you run it. The scanned repository can live elsewhere.
 ```sh
 mkdir -p ~/topo/zenpayroll
 cd ~/topo/zenpayroll
-
-# .topoignore lives here, outside the scanned repository
-topo map 'UserService' --dir ~/workspace/zenpayroll
+topo map
 ```
 
-`--dir` selects the Git directory to scan. When omitted, topo scans the current
-directory for backwards compatibility. Topo searches only Git-tracked,
-non-ignored files under that directory.
+## Workspace configuration
+
+A workspace `topo.toml` specifies the default repository and regex:
+
+```toml
+version = 1
+scan_dir = "~/workspace/zenpayroll"
+pattern = "UserService"
+```
+
+The schema is strict: all three keys are required, `version` must be `1`, and
+unknown keys are rejected. `scan_dir` accepts a leading `~`, must resolve to a
+directory, and must be inside a Git repository. `pattern` must be a non-empty
+regex ripgrep can compile.
+
+`topo map` uses these values. A positional regex and `--dir` are optional CLI
+overrides:
+
+```sh
+topo map 'AdminUser' --dir ~/workspace/zenpayroll
+```
+
+Without `topo.toml`, topo preserves the original behavior: the positional regex
+is required and the current directory is scanned.
 
 ## Workspace exclusions
 

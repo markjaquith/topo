@@ -9,16 +9,24 @@ use std::{
 
 use ignore::gitignore::GitignoreBuilder;
 use regex::Regex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 const FORMAT_VERSION: u8 = 2;
 
 #[derive(Debug)]
 struct Options {
-    pattern: String,
+    pattern: Option<String>,
     output: Option<PathBuf>,
     scan_directory: Option<PathBuf>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkspaceConfig {
+    version: u8,
+    scan_dir: String,
+    pattern: String,
 }
 
 #[derive(Serialize)]
@@ -97,16 +105,27 @@ fn main() {
 fn run() -> Result<(), String> {
     let options = parse_args(env::args().skip(1).collect())?;
     let workspace_directory = env::current_dir().map_err(|error| error.to_string())?;
-    let scan_directory = options
+    let workspace_config = load_workspace_config(&workspace_directory)?;
+    let pattern = options
+        .pattern
+        .or_else(|| {
+            workspace_config
+                .as_ref()
+                .map(|config| config.pattern.clone())
+        })
+        .ok_or_else(|| {
+            "no regex supplied; pass one to `topo map` or set pattern in topo.toml".to_owned()
+        })?;
+    validate_pattern(&pattern)?;
+    let requested_scan_directory = options
         .scan_directory
-        .map(|path| {
-            if path.is_absolute() {
-                path
-            } else {
-                workspace_directory.join(path)
-            }
+        .or_else(|| {
+            workspace_config
+                .as_ref()
+                .map(|config| PathBuf::from(&config.scan_dir))
         })
         .unwrap_or_else(|| workspace_directory.clone());
+    let scan_directory = resolve_workspace_path(&requested_scan_directory, &workspace_directory)?;
     let scan_directory = fs::canonicalize(&scan_directory)
         .map_err(|error| format!("could not access {}: {error}", scan_directory.display()))?;
     let repository_root = git_root(&scan_directory)?;
@@ -129,7 +148,7 @@ fn run() -> Result<(), String> {
     let tracked_files = filter_available_files(&repository_root, tracked_files);
 
     status(&format!("Searching {} tracked files", tracked_files.len()));
-    let matches = search(&repository_root, &options.pattern, &tracked_files)?;
+    let matches = search(&repository_root, &pattern, &tracked_files)?;
 
     let mut matches_by_file: BTreeMap<String, usize> = BTreeMap::new();
     for occurrence in &matches {
@@ -161,7 +180,7 @@ fn run() -> Result<(), String> {
             workspace_directory: workspace_directory.display().to_string(),
             repository_root: repository_root.display().to_string(),
             scan_directory: scan_directory.display().to_string(),
-            regex: options.pattern,
+            regex: pattern,
             searched_at_unix_seconds,
             matcher: "ripgrep",
             file_selection: "git ls-files --cached, filtered through Git ignore rules, workspace .topoignore, and available working-tree files",
@@ -208,7 +227,7 @@ fn parse_args(args: Vec<String>) -> Result<Options, String> {
         Some(command) => return Err(format!("unknown command `{command}`\n\n{}", usage())),
     }
 
-    let pattern = args.next().ok_or_else(usage)?;
+    let mut pattern = None;
     let mut output = None;
     let mut scan_directory = None;
     while let Some(argument) = args.next() {
@@ -226,6 +245,10 @@ fn parse_args(args: Vec<String>) -> Result<Options, String> {
                 scan_directory = Some(PathBuf::from(path));
             }
             "--help" | "-h" => return Err(usage()),
+            _ if argument.starts_with('-') => {
+                return Err(format!("unexpected argument `{argument}`\n\n{}", usage()));
+            }
+            _ if pattern.is_none() => pattern = Some(argument),
             _ => return Err(format!("unexpected argument `{argument}`\n\n{}", usage())),
         }
     }
@@ -238,7 +261,60 @@ fn parse_args(args: Vec<String>) -> Result<Options, String> {
 }
 
 fn usage() -> String {
-    "Usage: topo map <regex> [--dir <scan-directory>] [--output <filename>]\n\nUse the current directory as the topo workspace. Search tracked files beneath --dir (or the current directory when omitted), applying .topoignore from the workspace, and write a JSON graph report plus a Mermaid sidecar.".to_owned()
+    "Usage: topo map [<regex>] [--dir <scan-directory>] [--output <filename>]\n\nUse the current directory as the topo workspace. The regex and scan directory may come from topo.toml; CLI values override them. Apply .topoignore from the workspace and write a JSON graph report plus a Mermaid sidecar.".to_owned()
+}
+
+fn load_workspace_config(workspace_directory: &Path) -> Result<Option<WorkspaceConfig>, String> {
+    let config_path = workspace_directory.join("topo.toml");
+    if !config_path.is_file() {
+        return Ok(None);
+    }
+    let contents = fs::read_to_string(&config_path)
+        .map_err(|error| format!("could not read {}: {error}", config_path.display()))?;
+    let config: WorkspaceConfig = toml::from_str(&contents)
+        .map_err(|error| format!("invalid {}: {error}", config_path.display()))?;
+    if config.version != 1 {
+        return Err(format!(
+            "invalid {}: version must be 1",
+            config_path.display()
+        ));
+    }
+    if config.scan_dir.trim().is_empty() {
+        return Err(format!(
+            "invalid {}: scan_dir must not be empty",
+            config_path.display()
+        ));
+    }
+    if config.pattern.trim().is_empty() {
+        return Err(format!(
+            "invalid {}: pattern must not be empty",
+            config_path.display()
+        ));
+    }
+    Ok(Some(config))
+}
+
+fn resolve_workspace_path(path: &Path, workspace_directory: &Path) -> Result<PathBuf, String> {
+    let path_text = path.to_str().ok_or("scan directory must be valid UTF-8")?;
+    if path_text == "~" {
+        return env::var_os("HOME")
+            .map(PathBuf::from)
+            .ok_or_else(|| "cannot expand ~ because HOME is not set".to_owned());
+    }
+    if let Some(relative_path) = path_text.strip_prefix("~/") {
+        let home = env::var_os("HOME").ok_or("cannot expand ~ because HOME is not set")?;
+        return Ok(PathBuf::from(home).join(relative_path));
+    }
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(workspace_directory.join(path))
+    }
+}
+
+fn validate_pattern(pattern: &str) -> Result<(), String> {
+    Regex::new(pattern).map_err(|error| format!("ripgrep could not compile the regex: {error}"))?;
+    Ok(())
 }
 
 fn git_root(search_directory: &Path) -> Result<PathBuf, String> {
@@ -676,6 +752,33 @@ mod tests {
             assert_eq!(imports.len(), 1);
             assert_eq!(imports[0].specifier, expected);
         }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn workspace_config_is_strictly_validated() {
+        let directory = env::temp_dir().join(format!("topo-config-test-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        let config_path = directory.join("topo.toml");
+        fs::write(
+            &config_path,
+            "version = 1\nscan_dir = \"~/workspace/example\"\npattern = \"Example\"\n",
+        )
+        .unwrap();
+        let config = load_workspace_config(&directory).unwrap().unwrap();
+        assert_eq!(config.scan_dir, "~/workspace/example");
+        assert_eq!(config.pattern, "Example");
+
+        fs::write(
+            &config_path,
+            "version = 1\nscan_dir = \"~/workspace/example\"\npattern = \"Example\"\nignore = \"db/migrate\"\n",
+        )
+        .unwrap();
+        assert!(
+            load_workspace_config(&directory)
+                .unwrap_err()
+                .contains("unknown field")
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 
