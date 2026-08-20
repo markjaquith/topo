@@ -31,7 +31,7 @@ const VIEWER_HTML: &str = r##"<!doctype html>
     * { box-sizing: border-box; }
     body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
     button, input { font: inherit; }
-    .topography { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none; opacity: .32; }
+    .topography { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none; opacity: .22; }
     .topbar, .stats, main { position: relative; }
     .topbar { padding: 20px 24px 16px; border-bottom: 1px solid var(--line); background: linear-gradient(120deg, rgba(23,34,53,.94), rgba(17,23,34,.90)); }
     .brand { color: var(--accent); font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
