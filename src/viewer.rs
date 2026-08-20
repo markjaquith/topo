@@ -31,8 +31,14 @@ const VIEWER_HTML: &str = r##"<!doctype html>
     * { box-sizing: border-box; }
     body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
     button, input { font: inherit; }
-    .topography { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none; opacity: .32; }
+    .topography { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: hidden; opacity: .32; }
     .topography path { vector-effect: non-scaling-stroke; }
+    .contours-a, .contours-b { transform-box: fill-box; transform-origin: center; }
+    .contours-a { animation: terrain-drift 42s ease-in-out infinite alternate; }
+    .contours-b { animation: terrain-breathe 58s ease-in-out infinite alternate; }
+    @keyframes terrain-drift { from { transform: translate(-1.5%, .8%) scale(1.025) rotate(-.25deg); } to { transform: translate(1.5%, -1%) scale(1.06) rotate(.25deg); } }
+    @keyframes terrain-breathe { from { transform: translate(1%, -1%) scale(.96); opacity: .42; } to { transform: translate(-1%, 1.5%) scale(1.06); opacity: .72; } }
+    @media (prefers-reduced-motion: reduce) { .contours-a, .contours-b { animation: none; } }
     .topbar, .stats, main { position: relative; }
     .topbar { padding: 20px 24px 16px; border-bottom: 1px solid var(--line); background: linear-gradient(120deg, rgba(23,34,53,.94), rgba(17,23,34,.90)); }
     .brand { color: var(--accent); font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
@@ -79,7 +85,7 @@ const VIEWER_HTML: &str = r##"<!doctype html>
 </head>
 <body>
   <svg class="topography" viewBox="0 0 1440 900" preserveAspectRatio="none" aria-hidden="true">
-    <g fill="none" stroke="#74c7ec" stroke-width="1.25">
+    <g class="contours-a" fill="none" stroke="#74c7ec" stroke-width="1.25">
       <path d="M-80 186 C80 62 234 80 330 178 S570 304 706 168 S966 50 1086 176 S1308 290 1520 96" />
       <path d="M-80 224 C92 102 228 118 318 210 S570 342 724 210 S954 96 1072 214 S1318 328 1520 136" />
       <path d="M-80 262 C104 144 222 158 304 246 S566 380 742 250 S940 138 1058 252 S1328 366 1520 176" />
@@ -87,7 +93,7 @@ const VIEWER_HTML: &str = r##"<!doctype html>
       <path d="M-80 338 C128 228 214 238 276 318 S556 460 778 334 S916 222 1030 328 S1348 446 1520 256" />
       <path d="M-80 376 C140 270 210 278 262 354 S552 500 796 376 S904 264 1016 366 S1358 486 1520 296" />
     </g>
-    <g fill="none" stroke="#fbbf24" stroke-width="1" opacity=".55">
+    <g class="contours-b" fill="none" stroke="#fbbf24" stroke-width="1" opacity=".55">
       <path d="M832 548 C922 468 1064 472 1142 552 C1222 634 1210 744 1126 802 C1038 862 900 834 840 746 C794 678 782 602 832 548 Z" />
       <path d="M858 570 C930 510 1044 510 1112 576 C1178 642 1168 726 1100 774 C1024 826 916 804 866 732 C828 676 820 612 858 570 Z" />
       <path d="M888 594 C946 550 1034 550 1088 600 C1140 650 1132 714 1078 752 C1018 792 934 774 896 718 C866 674 860 628 888 594 Z" />
@@ -361,6 +367,8 @@ mod tests {
     fn viewer_has_tree_and_detail_structure() {
         assert!(VIEWER_HTML.contains("<title>TOPO</title>"));
         assert!(VIEWER_HTML.contains("class=\"topography\""));
+        assert!(VIEWER_HTML.contains("terrain-drift"));
+        assert!(VIEWER_HTML.contains("prefers-reduced-motion"));
         assert!(VIEWER_HTML.contains("<div class=\"brand\">TOPO</div>"));
         assert!(VIEWER_HTML.contains("id=\"tree\""));
         assert!(VIEWER_HTML.contains("id=\"detail\""));
