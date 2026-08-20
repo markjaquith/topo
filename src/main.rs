@@ -723,11 +723,7 @@ fn mermaid(graph: &Graph) -> String {
     let mut node_names = BTreeMap::new();
     for (index, node) in graph.nodes.iter().enumerate() {
         let name = format!("N{index}");
-        let suffix = node
-            .match_count
-            .map(|count| format!(" ({count} matches)"))
-            .unwrap_or_default();
-        let label = format!("{}{}", node.label, suffix).replace('"', "#quot;");
+        let label = node.label.replace('"', "#quot;");
         result.push_str(&format!("    {name}[\"{label}\"]\n"));
         node_names.insert(&node.id, name);
     }
