@@ -144,7 +144,13 @@ fn run() -> Result<(), String> {
     )?;
     let tracked_files = filter_available_files(&repository_root, tracked_files);
 
-    let matches = search(&repository_root, &pattern, &tracked_files)?;
+    let home = env::var_os("HOME").map(PathBuf::from);
+    let search_label = format!(
+        "Searching  󰗄 {}  󰉋 {}",
+        pattern,
+        display_path(&scan_directory, &workspace_directory, home.as_deref())
+    );
+    let matches = search(&repository_root, &pattern, &tracked_files, &search_label)?;
 
     let mut matches_by_file: BTreeMap<String, usize> = BTreeMap::new();
     for occurrence in &matches {
@@ -186,7 +192,6 @@ fn run() -> Result<(), String> {
         .map_err(|error| format!("could not write {}: {error}", mermaid_output.display()))?;
 
     clear_status();
-    let home = env::var_os("HOME").map(PathBuf::from);
     println!(
         "󰈤  {} occurrences in {} files  󰗄 {}  󰉋 {}",
         format_number(report.matches.len()),
@@ -426,9 +431,14 @@ fn filter_available_files(repository_root: &Path, files: Vec<PathBuf>) -> Vec<Pa
     available
 }
 
-fn search(repository_root: &Path, pattern: &str, files: &[PathBuf]) -> Result<Vec<Match>, String> {
+fn search(
+    repository_root: &Path,
+    pattern: &str,
+    files: &[PathBuf],
+    progress_label: &str,
+) -> Result<Vec<Match>, String> {
     let total = files.len();
-    status_progress("Searching", 0, total);
+    status_progress(progress_label, 0, total);
     let mut processed = 0;
     let mut matches = Vec::new();
     for batch in path_batches(files) {
@@ -451,7 +461,7 @@ fn search(repository_root: &Path, pattern: &str, files: &[PathBuf]) -> Result<Ve
         validate_rg_status(&output.status, &output.stderr)?;
         matches.extend(parse_rg_output(&output.stdout)?);
         processed += batch.len();
-        status_progress("Searching", processed, total);
+        status_progress(progress_label, processed, total);
     }
     Ok(matches)
 }
@@ -739,10 +749,13 @@ fn display_path(path: &Path, current_directory: &Path, home: Option<&Path>) -> S
 
 fn format_number(number: usize) -> String {
     let digits = number.to_string();
-    let first_group_length = digits.len() % 3;
+    let first_group_length = match digits.len() % 3 {
+        0 => 3,
+        length => length,
+    };
     let mut formatted = String::with_capacity(digits.len() + digits.len() / 3);
     for (index, digit) in digits.char_indices() {
-        if index != 0 && (index - first_group_length) % 3 == 0 {
+        if index != 0 && index >= first_group_length && (index - first_group_length) % 3 == 0 {
             formatted.push(',');
         }
         formatted.push(digit);
@@ -918,6 +931,9 @@ mod tests {
             ),
             "~/elsewhere/report.topo.json"
         );
-        assert_eq!(format_number(8143), "8,143");
+        assert_eq!(format_number(999), "999");
+        assert_eq!(format_number(8_143), "8,143");
+        assert_eq!(format_number(61_028), "61,028");
+        assert_eq!(format_number(1_610_028), "1,610,028");
     }
 }
