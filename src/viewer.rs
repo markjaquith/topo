@@ -190,23 +190,36 @@ const VIEWER_HTML: &str = r##"<!doctype html>
       return paths;
     }
 
+    function relaxPoints(points, closed) {
+      const amount = .18;
+      return points.map((point, index) => {
+        if (!closed && (index === 0 || index === points.length - 1)) return point;
+        const previous = points[(index - 1 + points.length) % points.length];
+        const next = points[(index + 1) % points.length];
+        return [
+          point[0] * (1 - amount) + (previous[0] + next[0]) * amount / 2,
+          point[1] * (1 - amount) + (previous[1] + next[1]) * amount / 2,
+        ];
+      });
+    }
+
     function drawSmoothPath(context, points) {
       if (points.length < 2) return;
       const closed = points.length > 3 && pointKey(points[0]) === pointKey(points[points.length - 1]);
+      const path = relaxPoints(closed ? points.slice(0, -1) : points, closed);
       if (closed) {
-        const loop = points.slice(0, -1);
-        context.moveTo(...midpoint(loop[loop.length - 1], loop[0]));
-        for (let index = 0; index < loop.length; index++) {
-          context.quadraticCurveTo(...loop[index], ...midpoint(loop[index], loop[(index + 1) % loop.length]));
+        context.moveTo(...midpoint(path[path.length - 1], path[0]));
+        for (let index = 0; index < path.length; index++) {
+          context.quadraticCurveTo(...path[index], ...midpoint(path[index], path[(index + 1) % path.length]));
         }
         context.closePath();
         return;
       }
-      context.moveTo(...points[0]);
-      for (let index = 1; index < points.length - 1; index++) {
-        context.quadraticCurveTo(...points[index], ...midpoint(points[index], points[index + 1]));
+      context.moveTo(...path[0]);
+      for (let index = 1; index < path.length - 1; index++) {
+        context.quadraticCurveTo(...path[index], ...midpoint(path[index], path[index + 1]));
       }
-      context.lineTo(...points[points.length - 1]);
+      context.lineTo(...path[path.length - 1]);
     }
 
     function drawContours(context, values, columns, rows, cellWidth, cellHeight, levels, color, alpha) {
@@ -570,6 +583,7 @@ mod tests {
         assert!(VIEWER_HTML.contains("drawContours"));
         assert!(VIEWER_HTML.contains("stitchSegments"));
         assert!(VIEWER_HTML.contains("quadraticCurveTo"));
+        assert!(VIEWER_HTML.contains("relaxPoints"));
         assert!(VIEWER_HTML.contains("context.lineJoin = 'round'"));
         assert!(VIEWER_HTML.contains("context.lineCap = 'round'"));
         assert!(VIEWER_HTML.contains("prefers-reduced-motion"));
