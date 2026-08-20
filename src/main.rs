@@ -4,6 +4,7 @@ use std::{
     io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
     process::{Command, ExitStatus},
+    sync::atomic::{AtomicBool, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -13,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 const FORMAT_VERSION: u8 = 2;
+static STATUS_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug)]
 struct Options {
@@ -133,6 +135,12 @@ fn run() -> Result<(), String> {
         .strip_prefix(&repository_root)
         .map_err(|_| "the scan directory must be inside the repository root".to_owned())?;
 
+    let home = env::var_os("HOME").map(PathBuf::from);
+    start_status_display(&format!(
+        "󰗄  {}  󰉋  {}",
+        pattern,
+        display_path(&scan_directory, &workspace_directory, home.as_deref())
+    ));
     status_working("Listing tracked files");
     let tracked_files = tracked_files(&repository_root, scope)?;
     let tracked_files = filter_ignored_files(&repository_root, tracked_files)?;
@@ -144,13 +152,7 @@ fn run() -> Result<(), String> {
     )?;
     let tracked_files = filter_available_files(&repository_root, tracked_files);
 
-    let home = env::var_os("HOME").map(PathBuf::from);
-    let search_label = format!(
-        "Searching  󰗄 {}  󰉋 {}",
-        pattern,
-        display_path(&scan_directory, &workspace_directory, home.as_deref())
-    );
-    let matches = search(&repository_root, &pattern, &tracked_files, &search_label)?;
+    let matches = search(&repository_root, &pattern, &tracked_files, "Searching")?;
 
     let mut matches_by_file: BTreeMap<String, usize> = BTreeMap::new();
     for occurrence in &matches {
@@ -349,7 +351,7 @@ fn filter_ignored_files(
     files: Vec<PathBuf>,
 ) -> Result<Vec<PathBuf>, String> {
     let total = files.len();
-    status_progress("Filtering Git ignores", 0, total);
+    status_progress("Git ignores", 0, total);
     let mut processed = 0;
     let mut ignored = BTreeSet::new();
     for batch in path_batches(&files) {
@@ -372,7 +374,7 @@ fn filter_ignored_files(
                 .map(PathBuf::from),
         );
         processed += batch.len();
-        status_progress("Filtering Git ignores", processed, total);
+        status_progress("Git ignores", processed, total);
     }
     Ok(files
         .into_iter()
@@ -387,10 +389,10 @@ fn filter_topoignored_files(
     files: Vec<PathBuf>,
 ) -> Result<Vec<PathBuf>, String> {
     let total = files.len();
-    status_progress("Applying workspace exclusions", 0, total);
+    status_progress("Workspace exclusions", 0, total);
     let ignore_path = workspace_directory.join(".topoignore");
     if !ignore_path.is_file() {
-        status_progress("Applying workspace exclusions", total, total);
+        status_progress("Workspace exclusions", total, total);
         return Ok(files);
     }
 
@@ -410,7 +412,7 @@ fn filter_topoignored_files(
             included.push(path);
         }
         if should_refresh_progress(index + 1, total) {
-            status_progress("Applying workspace exclusions", index + 1, total);
+            status_progress("Workspace exclusions", index + 1, total);
         }
     }
     Ok(included)
@@ -418,14 +420,14 @@ fn filter_topoignored_files(
 
 fn filter_available_files(repository_root: &Path, files: Vec<PathBuf>) -> Vec<PathBuf> {
     let total = files.len();
-    status_progress("Checking files are available", 0, total);
+    status_progress("Checking files", 0, total);
     let mut available = Vec::with_capacity(total);
     for (index, path) in files.into_iter().enumerate() {
         if repository_root.join(&path).is_file() {
             available.push(path);
         }
         if should_refresh_progress(index + 1, total) {
-            status_progress("Checking files are available", index + 1, total);
+            status_progress("Checking files", index + 1, total);
         }
     }
     available
@@ -779,6 +781,15 @@ fn should_refresh_progress(completed: usize, total: usize) -> bool {
     completed.saturating_mul(100) / total != completed.saturating_sub(1).saturating_mul(100) / total
 }
 
+fn start_status_display(header: &str) {
+    if !io::stderr().is_terminal() {
+        return;
+    }
+    STATUS_ACTIVE.store(true, Ordering::Relaxed);
+    eprint!("\x1b[?25l\r\x1b[2K{header}\n");
+    let _ = io::stderr().flush();
+}
+
 fn status_working(message: &str) {
     status(&format!("󰄬  {message}"));
 }
@@ -801,17 +812,14 @@ fn status_progress(label: &str, completed: usize, total: usize) {
 }
 
 fn status(message: &str) {
-    if io::stderr().is_terminal() {
-        eprint!("\x1b[?25l");
-    }
     eprint!("\r\x1b[2K{message}");
     let _ = io::stderr().flush();
 }
 
 fn clear_status() {
     eprint!("\r\x1b[2K");
-    if io::stderr().is_terminal() {
-        eprint!("\x1b[?25h");
+    if STATUS_ACTIVE.swap(false, Ordering::Relaxed) {
+        eprint!("\x1b[1A\r\x1b[2K\x1b[?25h");
     }
     let _ = io::stderr().flush();
 }
