@@ -24,7 +24,7 @@ struct Options {
     mode: Option<MapMode>,
 }
 
-#[derive(Clone, Copy, Debug, Default, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum MapMode {
     #[default]
@@ -224,7 +224,7 @@ fn run(arguments: Vec<String>) -> Result<(), String> {
 
     status_working("Writing report");
     write_report(&output, &report)?;
-    fs::write(&mermaid_output, mermaid(&report.graph))
+    fs::write(&mermaid_output, mermaid(&report.graph, mode))
         .map_err(|error| format!("could not write {}: {error}", mermaid_output.display()))?;
 
     clear_status();
@@ -755,7 +755,7 @@ struct DirectoryTree<'a> {
     files: Vec<&'a Node>,
 }
 
-fn mermaid(graph: &Graph) -> String {
+fn mermaid(graph: &Graph, mode: MapMode) -> String {
     let mut result = String::from("flowchart LR\n");
     let node_names = graph
         .nodes
@@ -776,11 +776,12 @@ fn mermaid(graph: &Graph) -> String {
         &node_names,
         &mut next_directory_id,
         1,
+        mode,
     );
     let target_nodes = graph
         .nodes
         .iter()
-        .filter(|node| node.is_target)
+        .filter(|node| mode == MapMode::All && node.is_target)
         .map(|node| node_names[&node.id].as_str())
         .collect::<Vec<_>>();
     if !target_nodes.is_empty() {
@@ -811,11 +812,13 @@ fn write_directory_tree(
     node_names: &BTreeMap<String, String>,
     next_directory_id: &mut usize,
     indent: usize,
+    mode: MapMode,
 ) {
     for node in &tree.files {
         let filename = node.label.rsplit('/').next().unwrap_or(&node.label);
         let label = match node.match_count {
-            Some(match_count) if node.is_target => {
+            Some(_) if mode == MapMode::Filenames => filename.to_owned(),
+            Some(match_count) if mode == MapMode::All && node.is_target => {
                 format!("◆ {filename} ({})", format_number(match_count))
             }
             Some(match_count) => format!("{filename} ({})", format_number(match_count)),
@@ -831,7 +834,14 @@ fn write_directory_tree(
             "{padding}subgraph {directory_id}[\"{}\"]\n",
             mermaid_label(directory)
         ));
-        write_directory_tree(result, child, node_names, next_directory_id, indent + 1);
+        write_directory_tree(
+            result,
+            child,
+            node_names,
+            next_directory_id,
+            indent + 1,
+            mode,
+        );
         result.push_str(&format!("{padding}end\n"));
     }
 }
@@ -1095,7 +1105,7 @@ mod tests {
             ],
         };
 
-        let diagram = mermaid(&graph);
+        let diagram = mermaid(&graph, MapMode::All);
         assert!(diagram.contains("subgraph D0[\"packs\"]"));
         assert!(diagram.contains("subgraph D1[\"payments\"]"));
         assert!(diagram.contains("subgraph D2[\"app\"]"));
@@ -1107,6 +1117,12 @@ mod tests {
         ));
         assert!(diagram.contains("class N0 target"));
         assert!(!diagram.contains("-->"));
+
+        let filename_diagram = mermaid(&graph, MapMode::Filenames);
+        assert!(filename_diagram.contains("N0[\"client.rb\"]"));
+        assert!(!filename_diagram.contains("◆"));
+        assert!(!filename_diagram.contains("(1)"));
+        assert!(!filename_diagram.contains("classDef target"));
     }
 
     #[test]
