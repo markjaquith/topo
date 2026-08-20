@@ -51,7 +51,9 @@ db/schema.rb
 
 The report JSON contains the workspace directory, scan directory, repository
 root, regex, timestamp, every occurrence, matching files, and directory graph
-nodes. The Mermaid sidecar groups matching files by every directory level. It
-has the same filename and a `.mmd` extension and is written alongside the JSON.
+nodes. Each matching file has an `is_target` flag when its basename matches the
+regex. The Mermaid sidecar groups matching files by every directory level and
+renders targets with a `◆` marker plus an amber fill and border. It has the
+same filename and a `.mmd` extension and is written alongside the JSON.
 Without `--output`, the report is named
 `<scan-dir-basename>.<unix-timestamp>.topo.json` in the workspace.

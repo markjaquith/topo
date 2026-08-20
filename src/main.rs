@@ -13,7 +13,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-const FORMAT_VERSION: u8 = 3;
+const FORMAT_VERSION: u8 = 4;
 static STATUS_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug)]
@@ -65,6 +65,7 @@ struct Match {
 struct FileResult {
     path: String,
     match_count: usize,
+    is_target: bool,
 }
 
 #[derive(Serialize)]
@@ -78,6 +79,7 @@ struct Node {
     kind: &'static str,
     label: String,
     match_count: Option<usize>,
+    is_target: bool,
 }
 
 fn main() {
@@ -109,7 +111,7 @@ fn run(arguments: Vec<String>) -> Result<(), String> {
         .ok_or_else(|| {
             "no regex supplied; pass one to `topo map` or set pattern in topo.toml".to_owned()
         })?;
-    validate_pattern(&pattern)?;
+    let filename_pattern = compile_pattern(&pattern)?;
     let requested_scan_directory = options
         .scan_directory
         .or_else(|| {
@@ -150,7 +152,7 @@ fn run(arguments: Vec<String>) -> Result<(), String> {
         *matches_by_file.entry(occurrence.file.clone()).or_default() += 1;
     }
 
-    let files = collect_file_results(&matches_by_file);
+    let files = collect_file_results(&matches_by_file, &filename_pattern);
 
     let graph = build_graph(&files);
     let searched_at_unix_seconds = SystemTime::now()
@@ -306,9 +308,8 @@ fn resolve_workspace_path(path: &Path, workspace_directory: &Path) -> Result<Pat
     }
 }
 
-fn validate_pattern(pattern: &str) -> Result<(), String> {
-    Regex::new(pattern).map_err(|error| format!("ripgrep could not compile the regex: {error}"))?;
-    Ok(())
+fn compile_pattern(pattern: &str) -> Result<Regex, String> {
+    Regex::new(pattern).map_err(|error| format!("ripgrep could not compile the regex: {error}"))
 }
 
 fn git_root(search_directory: &Path) -> Result<PathBuf, String> {
@@ -551,14 +552,22 @@ fn parse_rg_output(output: &[u8]) -> Result<Vec<Match>, String> {
     Ok(matches)
 }
 
-fn collect_file_results(matches_by_file: &BTreeMap<String, usize>) -> Vec<FileResult> {
+fn collect_file_results(
+    matches_by_file: &BTreeMap<String, usize>,
+    filename_pattern: &Regex,
+) -> Vec<FileResult> {
     let total = matches_by_file.len();
     status_progress("Collecting matching files", 0, total);
     let mut files = Vec::with_capacity(total);
     for (index, (path, match_count)) in matches_by_file.iter().enumerate() {
+        let filename = Path::new(path)
+            .file_name()
+            .and_then(|filename| filename.to_str())
+            .unwrap_or_default();
         files.push(FileResult {
             path: path.clone(),
             match_count: *match_count,
+            is_target: filename_pattern.is_match(filename),
         });
         if should_refresh_progress(index + 1, total) {
             status_progress("Collecting matching files", index + 1, total);
@@ -577,6 +586,7 @@ fn build_graph(files: &[FileResult]) -> Graph {
             kind: "file",
             label: file.path.clone(),
             match_count: Some(file.match_count),
+            is_target: file.is_target,
         });
         if should_refresh_progress(index + 1, total) {
             status_progress("Constructing graph", index + 1, total);
@@ -629,6 +639,18 @@ fn mermaid(graph: &Graph) -> String {
         &mut next_directory_id,
         1,
     );
+    let target_nodes = graph
+        .nodes
+        .iter()
+        .filter(|node| node.is_target)
+        .map(|node| node_names[&node.id].as_str())
+        .collect::<Vec<_>>();
+    if !target_nodes.is_empty() {
+        result.push_str(
+            "    classDef target fill:#FEF3C7,stroke:#D97706,stroke-width:3px,color:#451A03\n",
+        );
+        result.push_str(&format!("    class {} target\n", target_nodes.join(",")));
+    }
     result
 }
 
@@ -655,6 +677,9 @@ fn write_directory_tree(
     for node in &tree.files {
         let filename = node.label.rsplit('/').next().unwrap_or(&node.label);
         let label = match node.match_count {
+            Some(match_count) if node.is_target => {
+                format!("◆ {filename} ({})", format_number(match_count))
+            }
             Some(match_count) => format!("{filename} ({})", format_number(match_count)),
             None => filename.to_owned(),
         };
@@ -878,18 +903,21 @@ mod tests {
                     kind: "file",
                     label: "packs/payments/app/client.rb".to_owned(),
                     match_count: Some(1),
+                    is_target: true,
                 },
                 Node {
                     id: "file:packs/payments/lib/helper.rb".to_owned(),
                     kind: "file",
                     label: "packs/payments/lib/helper.rb".to_owned(),
                     match_count: Some(1),
+                    is_target: false,
                 },
                 Node {
                     id: "file:src/main.rs".to_owned(),
                     kind: "file",
                     label: "src/main.rs".to_owned(),
                     match_count: Some(1),
+                    is_target: false,
                 },
             ],
         };
@@ -900,7 +928,11 @@ mod tests {
         assert!(diagram.contains("subgraph D2[\"app\"]"));
         assert!(diagram.contains("subgraph D3[\"lib\"]"));
         assert!(diagram.contains("subgraph D4[\"src\"]"));
-        assert!(diagram.contains("N0[\"client.rb (1)\"]"));
+        assert!(diagram.contains("N0[\"◆ client.rb (1)\"]"));
+        assert!(diagram.contains(
+            "classDef target fill:#FEF3C7,stroke:#D97706,stroke-width:3px,color:#451A03"
+        ));
+        assert!(diagram.contains("class N0 target"));
         assert!(!diagram.contains("-->"));
     }
 
