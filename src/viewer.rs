@@ -57,8 +57,8 @@ const VIEWER_HTML: &str = r##"<!doctype html>
     .file { display: flex; width: 100%; gap: 8px; align-items: center; padding: 5px 7px; color: var(--text); border: 1px solid transparent; border-radius: 5px; background: transparent; text-align: left; cursor: pointer; }
     .file:hover, .file.selected { background: var(--panel-raised); border-color: var(--line); }
     .file.target { color: #fde68a; }
-    .file .count { margin-left: auto; color: var(--muted); }
-    .file .count.zero { color: var(--target); }
+    .file .count { display: inline-flex; min-width: 24px; height: 24px; align-items: center; justify-content: center; margin-left: auto; padding: 0 7px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; background: var(--bg); font-size: 12px; }
+    .file .count.zero { color: #fde68a; border-color: #a16207; background: var(--target-bg); }
     section.detail { overflow: auto; padding: 28px; }
     .empty { max-width: 520px; margin: 18vh auto; color: var(--muted); text-align: center; }
     .path { color: var(--muted); overflow-wrap: anywhere; }
@@ -84,7 +84,7 @@ const VIEWER_HTML: &str = r##"<!doctype html>
         <input id="query" type="search" placeholder="Filter files and directories">
         <div class="filters">
           <button class="filter active" data-filter="all">All</button>
-          <button class="filter" data-filter="targets">◆ Targets</button>
+          <button class="filter" data-filter="targets">Targets</button>
           <button class="filter" data-filter="sprinkles">Sprinkles</button>
         </div>
       </div>
@@ -93,19 +93,19 @@ const VIEWER_HTML: &str = r##"<!doctype html>
     <section class="detail" id="detail"></section>
   </main>
   <script>
-    const state = { report: null, query: '', filter: 'all', selected: null };
+    const state = { report: null, query: '', filter: 'all', selected: null, expanded: new Set(), treeInitialized: false };
     const byFile = new Map();
     const escapeHtml = value => String(value).replace(/[&<>'"]/g, character => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[character]));
     const number = value => new Intl.NumberFormat().format(value);
 
     function buildTree(files) {
-      const root = { name: '', dirs: new Map(), files: [] };
+      const root = { name: '', path: '', dirs: new Map(), files: [] };
       for (const file of files) {
         const parts = file.path.split('/');
         const filename = parts.pop();
         let current = root;
         for (const part of parts) {
-          if (!current.dirs.has(part)) current.dirs.set(part, { name: part, dirs: new Map(), files: [] });
+          if (!current.dirs.has(part)) current.dirs.set(part, { name: part, path: current.path ? `${current.path}/${part}` : part, dirs: new Map(), files: [] });
           current = current.dirs.get(part);
         }
         current.files.push({ ...file, filename });
@@ -125,26 +125,33 @@ const VIEWER_HTML: &str = r##"<!doctype html>
       return node.files.filter(matchesFilter).length + [...node.dirs.values()].reduce((sum, child) => sum + visibleFileCount(child), 0);
     }
 
-    function renderTreeNode(node, depth = 0) {
+    function renderTreeNode(node) {
       const directFiles = node.files.filter(matchesFilter).sort((a, b) => a.filename.localeCompare(b.filename));
       const directories = [...node.dirs.values()].filter(child => visibleFileCount(child) > 0).sort((a, b) => a.name.localeCompare(b.name));
       if (!directFiles.length && !directories.length) return '';
-      const children = directories.map(child => renderTreeNode(child, depth + 1)).join('') + directFiles.map(file => {
+      const children = directories.map(child => renderTreeNode(child)).join('') + directFiles.map(file => {
         const selected = state.selected === file.path ? ' selected' : '';
         const target = file.is_target ? ' target' : '';
-        const marker = file.is_target ? '◆ ' : '';
-        const count = file.match_count ? `(${number(file.match_count)})` : 'target';
+        const count = file.match_count ? number(file.match_count) : 'target';
         const zero = file.match_count ? '' : ' zero';
-        return `<button class="file${target}${selected}" data-path="${escapeHtml(file.path)}"><span>${marker}${escapeHtml(file.filename)}</span><span class="count${zero}">${count}</span></button>`;
+        return `<button class="file${target}${selected}" data-path="${escapeHtml(file.path)}"><span>${escapeHtml(file.filename)}</span><span class="count${zero}">${count}</span></button>`;
       }).join('');
       if (!node.name) return `<div class="tree-root">${children}</div>`;
-      const open = depth === 0 ? ' open' : '';
-      return `<details${open}><summary>📁 ${escapeHtml(node.name)} <span class="directory-count">${number(visibleFileCount(node))}</span></summary><div class="children">${children}</div></details>`;
+      const open = state.expanded.has(node.path) ? ' open' : '';
+      return `<details data-path="${escapeHtml(node.path)}"${open}><summary>${escapeHtml(node.name)} <span class="directory-count">${number(visibleFileCount(node))}</span></summary><div class="children">${children}</div></details>`;
     }
 
     function renderTree() {
       const root = buildTree(state.report.files);
+      if (!state.treeInitialized) {
+        for (const directory of root.dirs.values()) state.expanded.add(directory.path);
+        state.treeInitialized = true;
+      }
       document.querySelector('#tree').innerHTML = renderTreeNode(root) || '<div class="empty">No matching files</div>';
+      document.querySelectorAll('details[data-path]').forEach(details => details.addEventListener('toggle', () => {
+        if (details.open) state.expanded.add(details.dataset.path);
+        else state.expanded.delete(details.dataset.path);
+      }));
       document.querySelectorAll('.file').forEach(button => button.addEventListener('click', () => {
         state.selected = button.dataset.path;
         renderTree();
@@ -160,7 +167,7 @@ const VIEWER_HTML: &str = r##"<!doctype html>
         return;
       }
       const matches = byFile.get(file.path) || [];
-      const target = file.is_target ? '<span class="badge target">◆ filename target</span>' : '<span class="badge">content match</span>';
+      const target = file.is_target ? '<span class="badge target">filename target</span>' : '<span class="badge">content match</span>';
       const count = `<span class="badge">${number(file.match_count)} content hits</span>`;
       const lines = matches.length ? matches.map(match => `<div class="match"><span class="location">${match.line}:${match.column}</span><code>${escapeHtml(match.text)}</code></div>`).join('') : '<p class="path">No content hits — selected by filename.</p>';
       detail.innerHTML = `<h2>${escapeHtml(file.filename || file.path.split('/').pop())}</h2><div class="path">${escapeHtml(file.path)}</div><div class="badges">${target}${count}</div><div class="matches">${lines}</div>`;
@@ -169,8 +176,8 @@ const VIEWER_HTML: &str = r##"<!doctype html>
     function renderHeader() {
       const metadata = state.report.metadata;
       document.querySelector('#context').innerHTML = `
-        <span>󰗄 <strong>${escapeHtml(metadata.regex)}</strong></span>
-        <span>󰉋 ${escapeHtml(metadata.scan_directory)}</span>
+        <span>Pattern <strong>${escapeHtml(metadata.regex)}</strong></span>
+        <span>Directory ${escapeHtml(metadata.scan_directory)}</span>
         <span>mode <strong>${escapeHtml(metadata.mode)}</strong></span>`;
       const files = state.report.files;
       const targets = files.filter(file => file.is_target).length;
@@ -230,8 +237,8 @@ pub fn run(report_path: PathBuf, open_browser: bool) -> Result<(), String> {
         .map_err(|error| format!("could not determine viewer address: {error}"))?;
     let url = format!("http://{address}");
 
-    println!("󰈙  {}", report_path.display());
-    println!("󰉋  {url}");
+    println!("Report  {}", report_path.display());
+    println!("Viewer  {url}");
     println!("Press Ctrl-C to stop the viewer");
     if open_browser {
         if let Err(error) = Command::new("open").arg(&url).spawn() {
@@ -299,5 +306,7 @@ mod tests {
         assert!(VIEWER_HTML.contains("id=\"tree\""));
         assert!(VIEWER_HTML.contains("id=\"detail\""));
         assert!(VIEWER_HTML.contains("data-filter=\"targets\""));
+        assert!(VIEWER_HTML.contains("state.expanded"));
+        assert!(!VIEWER_HTML.contains('◆'));
     }
 }
