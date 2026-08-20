@@ -776,6 +776,7 @@ fn mermaid(graph: &Graph, mode: MapMode) -> String {
         &node_names,
         &mut next_directory_id,
         &[],
+        &[],
         1,
         mode,
     );
@@ -813,6 +814,7 @@ fn write_directory_tree(
     node_names: &BTreeMap<String, String>,
     next_directory_id: &mut usize,
     directory_path: &[String],
+    visible_parent_path: &[String],
     indent: usize,
     mode: MapMode,
 ) {
@@ -838,6 +840,7 @@ fn write_directory_tree(
                 node_names,
                 next_directory_id,
                 &child_path,
+                visible_parent_path,
                 indent,
                 mode,
             );
@@ -847,15 +850,20 @@ fn write_directory_tree(
         let directory_id = format!("D{next_directory_id}");
         *next_directory_id += 1;
         let padding = "    ".repeat(indent);
+        let label = child_path
+            .strip_prefix(visible_parent_path)
+            .expect("visible parent is an ancestor of its child")
+            .join("/");
         result.push_str(&format!(
             "{padding}subgraph {directory_id}[\"{}\"]\n",
-            mermaid_label(&child_path.join("/"))
+            mermaid_label(&label)
         ));
         write_directory_tree(
             result,
             child,
             node_names,
             next_directory_id,
+            &child_path,
             &child_path,
             indent + 1,
             mode,
@@ -1096,7 +1104,7 @@ mod tests {
     }
 
     #[test]
-    fn mermaid_groups_only_direct_file_directories_with_full_paths() {
+    fn mermaid_collapses_empty_directory_segments_relative_to_visible_parents() {
         let graph = Graph {
             nodes: vec![
                 Node {
@@ -1114,6 +1122,20 @@ mod tests {
                     is_target: false,
                 },
                 Node {
+                    id: "file:packs/payments/root.rb".to_owned(),
+                    kind: "file",
+                    label: "packs/payments/root.rb".to_owned(),
+                    match_count: Some(1),
+                    is_target: false,
+                },
+                Node {
+                    id: "file:packs/payments/extra/deep/worker.rb".to_owned(),
+                    kind: "file",
+                    label: "packs/payments/extra/deep/worker.rb".to_owned(),
+                    match_count: Some(1),
+                    is_target: false,
+                },
+                Node {
                     id: "file:src/main.rs".to_owned(),
                     kind: "file",
                     label: "src/main.rs".to_owned(),
@@ -1125,9 +1147,11 @@ mod tests {
 
         let diagram = mermaid(&graph, MapMode::All);
         assert!(!diagram.contains("subgraph D0[\"packs\"]"));
-        assert!(diagram.contains("subgraph D0[\"packs/payments/app\"]"));
-        assert!(diagram.contains("subgraph D1[\"packs/payments/lib\"]"));
-        assert!(diagram.contains("subgraph D2[\"src\"]"));
+        assert!(diagram.contains("subgraph D0[\"packs/payments\"]"));
+        assert!(diagram.contains("subgraph D1[\"app\"]"));
+        assert!(diagram.contains("subgraph D2[\"extra/deep\"]"));
+        assert!(diagram.contains("subgraph D3[\"lib\"]"));
+        assert!(diagram.contains("subgraph D4[\"src\"]"));
         assert!(diagram.contains("N0[\"◆ client.rb (1)\"]"));
         assert!(diagram.contains(
             "classDef target fill:#FEF3C7,stroke:#D97706,stroke-width:3px,color:#451A03"
