@@ -7,16 +7,18 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use ignore::gitignore::GitignoreBuilder;
 use regex::Regex;
 use serde::Serialize;
 use serde_json::Value;
 
-const FORMAT_VERSION: u8 = 1;
+const FORMAT_VERSION: u8 = 2;
 
 #[derive(Debug)]
 struct Options {
     pattern: String,
     output: Option<PathBuf>,
+    scan_directory: Option<PathBuf>,
 }
 
 #[derive(Serialize)]
@@ -30,8 +32,9 @@ struct Report {
 
 #[derive(Serialize)]
 struct Metadata {
+    workspace_directory: String,
     repository_root: String,
-    search_directory: String,
+    scan_directory: String,
     regex: String,
     searched_at_unix_seconds: u64,
     matcher: &'static str,
@@ -93,16 +96,35 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let options = parse_args(env::args().skip(1).collect())?;
-    let search_directory = env::current_dir().map_err(|error| error.to_string())?;
-    let repository_root = git_root(&search_directory)?;
-    let scope = search_directory
+    let workspace_directory = env::current_dir().map_err(|error| error.to_string())?;
+    let scan_directory = options
+        .scan_directory
+        .map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                workspace_directory.join(path)
+            }
+        })
+        .unwrap_or_else(|| workspace_directory.clone());
+    let scan_directory = fs::canonicalize(&scan_directory)
+        .map_err(|error| format!("could not access {}: {error}", scan_directory.display()))?;
+    let repository_root = git_root(&scan_directory)?;
+    let scope = scan_directory
         .strip_prefix(&repository_root)
-        .map_err(|_| "the current directory must be inside the repository root".to_owned())?;
+        .map_err(|_| "the scan directory must be inside the repository root".to_owned())?;
 
     status("Listing tracked files");
     let tracked_files = tracked_files(&repository_root, scope)?;
     status("Filtering ignored files");
     let tracked_files = filter_ignored_files(&repository_root, tracked_files)?;
+    status("Applying workspace exclusions");
+    let tracked_files = filter_topoignored_files(
+        &repository_root,
+        &scan_directory,
+        &workspace_directory,
+        tracked_files,
+    )?;
     status("Checking tracked files are available");
     let tracked_files = filter_available_files(&repository_root, tracked_files);
 
@@ -136,12 +158,13 @@ fn run() -> Result<(), String> {
     let report = Report {
         format_version: FORMAT_VERSION,
         metadata: Metadata {
+            workspace_directory: workspace_directory.display().to_string(),
             repository_root: repository_root.display().to_string(),
-            search_directory: search_directory.display().to_string(),
+            scan_directory: scan_directory.display().to_string(),
             regex: options.pattern,
             searched_at_unix_seconds,
             matcher: "ripgrep",
-            file_selection: "git ls-files --cached, filtered through git check-ignore --no-index and available working-tree files",
+            file_selection: "git ls-files --cached, filtered through Git ignore rules, workspace .topoignore, and available working-tree files",
             tracked_file_count: tracked_files.len(),
         },
         matches,
@@ -150,10 +173,7 @@ fn run() -> Result<(), String> {
     };
 
     let output = options.output.unwrap_or_else(|| {
-        search_directory.join(default_filename(
-            &search_directory,
-            searched_at_unix_seconds,
-        ))
+        workspace_directory.join(default_filename(&scan_directory, searched_at_unix_seconds))
     });
     let mermaid_output = output.with_extension("mmd");
 
@@ -171,11 +191,11 @@ fn run() -> Result<(), String> {
     );
     println!(
         "󰈙  {}",
-        display_path(&output, &search_directory, home.as_deref())
+        display_path(&output, &workspace_directory, home.as_deref())
     );
     println!(
         "󰈙  {}",
-        display_path(&mermaid_output, &search_directory, home.as_deref())
+        display_path(&mermaid_output, &workspace_directory, home.as_deref())
     );
     Ok(())
 }
@@ -190,6 +210,7 @@ fn parse_args(args: Vec<String>) -> Result<Options, String> {
 
     let pattern = args.next().ok_or_else(usage)?;
     let mut output = None;
+    let mut scan_directory = None;
     while let Some(argument) = args.next() {
         match argument.as_str() {
             "--output" | "-o" => {
@@ -198,16 +219,26 @@ fn parse_args(args: Vec<String>) -> Result<Options, String> {
                     .ok_or_else(|| "--output needs a filename".to_owned())?;
                 output = Some(PathBuf::from(path));
             }
+            "--dir" => {
+                let path = args
+                    .next()
+                    .ok_or_else(|| "--dir needs a directory".to_owned())?;
+                scan_directory = Some(PathBuf::from(path));
+            }
             "--help" | "-h" => return Err(usage()),
             _ => return Err(format!("unexpected argument `{argument}`\n\n{}", usage())),
         }
     }
 
-    Ok(Options { pattern, output })
+    Ok(Options {
+        pattern,
+        output,
+        scan_directory,
+    })
 }
 
 fn usage() -> String {
-    "Usage: topo map <regex> [--output <filename>]\n\nSearch tracked files beneath the current directory and write a JSON graph report plus a Mermaid sidecar.".to_owned()
+    "Usage: topo map <regex> [--dir <scan-directory>] [--output <filename>]\n\nUse the current directory as the topo workspace. Search tracked files beneath --dir (or the current directory when omitted), applying .topoignore from the workspace, and write a JSON graph report plus a Mermaid sidecar.".to_owned()
 }
 
 fn git_root(search_directory: &Path) -> Result<PathBuf, String> {
@@ -274,6 +305,34 @@ fn filter_ignored_files(
     Ok(files
         .into_iter()
         .filter(|path| !ignored.contains(path))
+        .collect())
+}
+
+fn filter_topoignored_files(
+    repository_root: &Path,
+    scan_directory: &Path,
+    workspace_directory: &Path,
+    files: Vec<PathBuf>,
+) -> Result<Vec<PathBuf>, String> {
+    let ignore_path = workspace_directory.join(".topoignore");
+    if !ignore_path.is_file() {
+        return Ok(files);
+    }
+
+    let mut builder = GitignoreBuilder::new(scan_directory);
+    if let Some(error) = builder.add(&ignore_path) {
+        return Err(format!("could not read {}: {error}", ignore_path.display()));
+    }
+    let matcher = builder
+        .build()
+        .map_err(|error| format!("could not parse {}: {error}", ignore_path.display()))?;
+    Ok(files
+        .into_iter()
+        .filter(|path| {
+            !matcher
+                .matched_path_or_any_parents(repository_root.join(path), false)
+                .is_ignore()
+        })
         .collect())
 }
 
@@ -618,6 +677,36 @@ mod tests {
             assert_eq!(imports[0].specifier, expected);
         }
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn workspace_topoignore_filters_scan_paths() {
+        let directory = env::temp_dir().join(format!("topo-ignore-test-{}", std::process::id()));
+        let repository_root = directory.join("repository");
+        let scan_directory = repository_root.join("component");
+        let workspace_directory = directory.join("workspace");
+        fs::create_dir_all(&scan_directory).unwrap();
+        fs::create_dir_all(&workspace_directory).unwrap();
+        fs::write(
+            workspace_directory.join(".topoignore"),
+            "db/migrate/\n**/schema.rb\n",
+        )
+        .unwrap();
+
+        let files = filter_topoignored_files(
+            &repository_root,
+            &scan_directory,
+            &workspace_directory,
+            vec![
+                PathBuf::from("component/app/service.rb"),
+                PathBuf::from("component/db/migrate/001_create_users.rb"),
+                PathBuf::from("component/db/schema.rb"),
+            ],
+        )
+        .unwrap();
+
+        fs::remove_dir_all(directory).unwrap();
+        assert_eq!(files, vec![PathBuf::from("component/app/service.rb")]);
     }
 
     #[test]
