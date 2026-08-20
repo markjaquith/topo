@@ -775,6 +775,7 @@ fn mermaid(graph: &Graph, mode: MapMode) -> String {
         &directories,
         &node_names,
         &mut next_directory_id,
+        &[],
         1,
         mode,
     );
@@ -811,6 +812,7 @@ fn write_directory_tree(
     tree: &DirectoryTree<'_>,
     node_names: &BTreeMap<String, String>,
     next_directory_id: &mut usize,
+    directory_path: &[String],
     indent: usize,
     mode: MapMode,
 ) {
@@ -827,18 +829,34 @@ fn write_directory_tree(
         write_mermaid_node(result, node, node_names, indent, &label);
     }
     for (directory, child) in &tree.directories {
+        let mut child_path = directory_path.to_vec();
+        child_path.push(directory.clone());
+        if child.files.is_empty() {
+            write_directory_tree(
+                result,
+                child,
+                node_names,
+                next_directory_id,
+                &child_path,
+                indent,
+                mode,
+            );
+            continue;
+        }
+
         let directory_id = format!("D{next_directory_id}");
         *next_directory_id += 1;
         let padding = "    ".repeat(indent);
         result.push_str(&format!(
             "{padding}subgraph {directory_id}[\"{}\"]\n",
-            mermaid_label(directory)
+            mermaid_label(&child_path.join("/"))
         ));
         write_directory_tree(
             result,
             child,
             node_names,
             next_directory_id,
+            &child_path,
             indent + 1,
             mode,
         );
@@ -1078,7 +1096,7 @@ mod tests {
     }
 
     #[test]
-    fn mermaid_nests_files_at_every_directory_level() {
+    fn mermaid_groups_only_direct_file_directories_with_full_paths() {
         let graph = Graph {
             nodes: vec![
                 Node {
@@ -1106,11 +1124,10 @@ mod tests {
         };
 
         let diagram = mermaid(&graph, MapMode::All);
-        assert!(diagram.contains("subgraph D0[\"packs\"]"));
-        assert!(diagram.contains("subgraph D1[\"payments\"]"));
-        assert!(diagram.contains("subgraph D2[\"app\"]"));
-        assert!(diagram.contains("subgraph D3[\"lib\"]"));
-        assert!(diagram.contains("subgraph D4[\"src\"]"));
+        assert!(!diagram.contains("subgraph D0[\"packs\"]"));
+        assert!(diagram.contains("subgraph D0[\"packs/payments/app\"]"));
+        assert!(diagram.contains("subgraph D1[\"packs/payments/lib\"]"));
+        assert!(diagram.contains("subgraph D2[\"src\"]"));
         assert!(diagram.contains("N0[\"◆ client.rb (1)\"]"));
         assert!(diagram.contains(
             "classDef target fill:#FEF3C7,stroke:#D97706,stroke-width:3px,color:#451A03"
