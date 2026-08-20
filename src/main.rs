@@ -202,11 +202,14 @@ fn run(arguments: Vec<String>) -> Result<(), String> {
 
     clear_status();
     println!(
-        "󰈤  {} occurrences in {} files  󰗄 {}  󰉋 {}",
-        format_number(report.matches.len()),
-        format_number(report.files.len()),
+        "󰗄  {}  󰉋  {}",
         pattern,
         display_path(&scan_directory, &workspace_directory, home.as_deref())
+    );
+    println!(
+        "󰈤  {} occurrences in {} files",
+        format_number(report.matches.len()),
+        format_number(report.files.len())
     );
     println!(
         "󰈙  {}",
