@@ -15,7 +15,7 @@ use serde_json::Value;
 
 mod viewer;
 
-const FORMAT_VERSION: u8 = 5;
+const FORMAT_VERSION: u8 = 7;
 static STATUS_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug)]
@@ -37,7 +37,7 @@ struct ViewOptions {
 enum MapMode {
     #[default]
     All,
-    Filenames,
+    Paths,
     Contents,
     Sprinkles,
 }
@@ -46,20 +46,20 @@ impl MapMode {
     fn parse(value: &str) -> Result<Self, String> {
         match value {
             "all" => Ok(Self::All),
-            "filenames" => Ok(Self::Filenames),
+            "paths" | "filenames" => Ok(Self::Paths),
             "contents" => Ok(Self::Contents),
             "sprinkles" => Ok(Self::Sprinkles),
             _ => Err(format!(
-                "unknown mode `{value}`; expected all, filenames, contents, or sprinkles"
+                "unknown mode `{value}`; expected all, paths, contents, or sprinkles"
             )),
         }
     }
 
     fn searches_contents(self) -> bool {
-        !matches!(self, Self::Filenames)
+        !matches!(self, Self::Paths)
     }
 
-    fn checks_filenames(self) -> bool {
+    fn checks_paths(self) -> bool {
         !matches!(self, Self::Contents)
     }
 }
@@ -108,6 +108,15 @@ struct FileResult {
     path: String,
     match_count: usize,
     is_target: bool,
+    path_match_ranges: Vec<PathMatch>,
+    content: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Serialize)]
+struct PathMatch {
+    component_index: usize,
+    start: usize,
+    end: usize,
 }
 
 #[derive(Serialize)]
@@ -164,7 +173,7 @@ fn run(arguments: Vec<String>) -> Result<(), String> {
         .ok_or_else(|| {
             "no regex supplied; pass one to `topo map` or set pattern in topo.toml".to_owned()
         })?;
-    let filename_pattern = compile_pattern(&pattern)?;
+    let path_pattern = compile_pattern(&pattern)?;
     let mode = options.mode.unwrap_or_default();
     let requested_scan_directory = options
         .scan_directory
@@ -199,8 +208,8 @@ fn run(arguments: Vec<String>) -> Result<(), String> {
     )?;
     let tracked_files = filter_available_files(&repository_root, tracked_files);
 
-    let filename_targets = if mode.checks_filenames() {
-        find_filename_targets(&tracked_files, &filename_pattern)
+    let path_targets = if mode.checks_paths() {
+        find_path_targets(&tracked_files, &path_pattern)
     } else {
         BTreeSet::new()
     };
@@ -210,8 +219,8 @@ fn run(arguments: Vec<String>) -> Result<(), String> {
         Vec::new()
     };
     let content_match_counts = content_match_counts(&matches);
-    let selected_files = select_files(mode, content_match_counts, &filename_targets);
-    let files = collect_file_results(&selected_files);
+    let selected_files = select_files(mode, content_match_counts, &path_targets);
+    let files = collect_file_results(&repository_root, &selected_files, &path_pattern);
 
     let graph = build_graph(&files);
     let searched_at_unix_seconds = SystemTime::now()
@@ -349,7 +358,7 @@ fn parse_args(args: Vec<String>) -> Result<Options, String> {
 
 fn main_help() -> String {
     format!(
-        "████████╗ ██████╗ ██████╗  ██████╗\n╚══██╔══╝██╔═══██╗██╔══██╗██╔═══██╗\n   ██║   ██║   ██║██████╔╝██║   ██║\n   ██║   ██║   ██║██╔═══╝ ██║   ██║\n   ██║   ╚██████╔╝██║     ╚██████╔╝\n   ╚═╝    ╚═════╝ ╚═╝      ╚═════╝\n\n  Code topology maps  •  v{}\n\nUSAGE\n  topo map [<regex>] [--dir <scan-directory>] [--mode <mode>] [--output <filename>]\n\nCOMMANDS\n  map       Search Git-tracked code and write JSON + Mermaid maps\n  view      Browse a JSON map in a local web viewer\n\nWORKSPACE\n  topo map                 Use the pattern and directory in topo.toml\n  topo map 'UserService'   Override the configured regex\n\nOPTIONS\n  --mode <mode>            all (default), filenames, contents, or sprinkles\n  -h, --help               Show this help\n",
+        "████████╗ ██████╗ ██████╗  ██████╗\n╚══██╔══╝██╔═══██╗██╔══██╗██╔═══██╗\n   ██║   ██║   ██║██████╔╝██║   ██║\n   ██║   ██║   ██║██╔═══╝ ██║   ██║\n   ██║   ╚██████╔╝██║     ╚██████╔╝\n   ╚═╝    ╚═════╝ ╚═╝      ╚═════╝\n\n  Code topology maps  •  v{}\n\nUSAGE\n  topo map [<regex>] [--dir <scan-directory>] [--mode <mode>] [--output <filename>]\n\nCOMMANDS\n  map       Search Git-tracked code and write JSON + Mermaid maps\n  view      Browse a JSON map in a local web viewer\n\nWORKSPACE\n  topo map                 Use the pattern and directory in topo.toml\n  topo map 'UserService'   Override the configured regex\n\nOPTIONS\n  --mode <mode>            all (default), paths, contents, or sprinkles (`filenames` aliases paths)\n  -h, --help               Show this help\n",
         env!("CARGO_PKG_VERSION")
     )
 }
@@ -363,7 +372,7 @@ fn view_usage() -> String {
 }
 
 fn usage() -> String {
-    "Usage: topo map [<regex>] [--dir <scan-directory>] [--mode <mode>] [--output <filename>]\n\nMode is all (default), filenames, contents, or sprinkles. Use the current directory as the topo workspace. The regex and scan directory may come from topo.toml; CLI values override them. Apply .topoignore from the workspace and write a JSON graph report plus a Mermaid sidecar.".to_owned()
+    "Usage: topo map [<regex>] [--dir <scan-directory>] [--mode <mode>] [--output <filename>]\n\nMode is all (default), paths, contents, or sprinkles; `filenames` is an alias for paths. Use the current directory as the topo workspace. The regex and scan directory may come from topo.toml; CLI values override them. Apply .topoignore from the workspace and write a JSON graph report plus a Mermaid sidecar.".to_owned()
 }
 
 fn load_workspace_config(workspace_directory: &Path) -> Result<Option<WorkspaceConfig>, String> {
@@ -664,20 +673,17 @@ struct FileSelection {
     is_target: bool,
 }
 
-fn find_filename_targets(files: &[PathBuf], pattern: &Regex) -> BTreeSet<String> {
+fn find_path_targets(files: &[PathBuf], pattern: &Regex) -> BTreeSet<String> {
     let total = files.len();
-    status_progress("Finding filename targets", 0, total);
+    status_progress("Finding matching paths", 0, total);
     let mut targets = BTreeSet::new();
     for (index, path) in files.iter().enumerate() {
-        let filename = path
-            .file_name()
-            .and_then(|filename| filename.to_str())
-            .unwrap_or_default();
-        if pattern.is_match(filename) {
-            targets.insert(path.to_string_lossy().into_owned());
+        let path = path.to_string_lossy();
+        if !path_match_ranges(&path, pattern).is_empty() {
+            targets.insert(path.into_owned());
         }
         if should_refresh_progress(index + 1, total) {
-            status_progress("Finding filename targets", index + 1, total);
+            status_progress("Finding matching paths", index + 1, total);
         }
     }
     targets
@@ -694,7 +700,7 @@ fn content_match_counts(matches: &[Match]) -> BTreeMap<String, usize> {
 fn select_files(
     mode: MapMode,
     content_match_counts: BTreeMap<String, usize>,
-    filename_targets: &BTreeSet<String>,
+    path_targets: &BTreeSet<String>,
 ) -> BTreeMap<String, FileSelection> {
     let mut selected = BTreeMap::new();
     match mode {
@@ -704,19 +710,19 @@ fn select_files(
                     path.clone(),
                     FileSelection {
                         match_count,
-                        is_target: filename_targets.contains(&path),
+                        is_target: path_targets.contains(&path),
                     },
                 );
             }
-            for path in filename_targets {
+            for path in path_targets {
                 selected.entry(path.clone()).or_insert(FileSelection {
                     match_count: 0,
                     is_target: true,
                 });
             }
         }
-        MapMode::Filenames => {
-            for path in filename_targets {
+        MapMode::Paths => {
+            for path in path_targets {
                 selected.insert(
                     path.clone(),
                     FileSelection {
@@ -739,7 +745,7 @@ fn select_files(
         }
         MapMode::Sprinkles => {
             for (path, match_count) in content_match_counts {
-                if !filename_targets.contains(&path) {
+                if !path_targets.contains(&path) {
                     selected.insert(
                         path,
                         FileSelection {
@@ -754,21 +760,44 @@ fn select_files(
     selected
 }
 
-fn collect_file_results(selected_files: &BTreeMap<String, FileSelection>) -> Vec<FileResult> {
+fn collect_file_results(
+    repository_root: &Path,
+    selected_files: &BTreeMap<String, FileSelection>,
+    path_pattern: &Regex,
+) -> Vec<FileResult> {
     let total = selected_files.len();
-    status_progress("Collecting matching files", 0, total);
+    status_progress("Reading selected files", 0, total);
     let mut files = Vec::with_capacity(total);
     for (index, (path, selection)) in selected_files.iter().enumerate() {
         files.push(FileResult {
             path: path.clone(),
             match_count: selection.match_count,
             is_target: selection.is_target,
+            path_match_ranges: if selection.is_target {
+                path_match_ranges(path, path_pattern)
+            } else {
+                Vec::new()
+            },
+            content: fs::read_to_string(repository_root.join(path)).ok(),
         });
         if should_refresh_progress(index + 1, total) {
-            status_progress("Collecting matching files", index + 1, total);
+            status_progress("Reading selected files", index + 1, total);
         }
     }
     files
+}
+
+fn path_match_ranges(path: &str, pattern: &Regex) -> Vec<PathMatch> {
+    path.split('/')
+        .enumerate()
+        .flat_map(|(component_index, component)| {
+            pattern.find_iter(component).map(move |matched| PathMatch {
+                component_index,
+                start: component[..matched.start()].chars().count(),
+                end: component[..matched.end()].chars().count(),
+            })
+        })
+        .collect()
 }
 
 fn build_graph(files: &[FileResult]) -> Graph {
@@ -878,7 +907,7 @@ fn write_directory_tree(
     for node in &tree.files {
         let filename = node.label.rsplit('/').next().unwrap_or(&node.label);
         let label = match node.match_count {
-            Some(_) if mode == MapMode::Filenames => filename.to_owned(),
+            Some(_) if mode == MapMode::Paths => filename.to_owned(),
             Some(match_count) if mode == MapMode::All && node.is_target => {
                 format!("◆ {filename} ({})", format_number(match_count))
             }
@@ -1126,6 +1155,12 @@ mod tests {
     }
 
     #[test]
+    fn paths_mode_replaces_filenames_with_a_compatibility_alias() {
+        assert_eq!(MapMode::parse("paths").unwrap(), MapMode::Paths);
+        assert_eq!(MapMode::parse("filenames").unwrap(), MapMode::Paths);
+    }
+
+    #[test]
     fn map_modes_select_targets_and_sprinkles() {
         let content_matches = BTreeMap::from([
             ("airwallex_client.rb".to_owned(), 3),
@@ -1142,14 +1177,10 @@ mod tests {
         assert!(all["airwallex_client.rb"].is_target);
         assert_eq!(all["airwallex_webhook.rb"].match_count, 0);
 
-        let filenames = select_files(MapMode::Filenames, content_matches.clone(), &targets);
-        assert_eq!(filenames.len(), 2);
-        assert!(filenames.values().all(|selection| selection.is_target));
-        assert!(
-            filenames
-                .values()
-                .all(|selection| selection.match_count == 0)
-        );
+        let paths = select_files(MapMode::Paths, content_matches.clone(), &targets);
+        assert_eq!(paths.len(), 2);
+        assert!(paths.values().all(|selection| selection.is_target));
+        assert!(paths.values().all(|selection| selection.match_count == 0));
 
         let contents = select_files(MapMode::Contents, content_matches.clone(), &targets);
         assert_eq!(contents.len(), 2);
@@ -1158,6 +1189,66 @@ mod tests {
         let sprinkles = select_files(MapMode::Sprinkles, content_matches, &targets);
         assert_eq!(sprinkles.len(), 1);
         assert_eq!(sprinkles["payments_service.rb"].match_count, 2);
+    }
+
+    #[test]
+    fn selected_file_results_include_full_text_content() {
+        let directory = env::temp_dir().join(format!("topo-content-test-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("report.rb"), "class Report\nend\n").unwrap();
+        let selections = BTreeMap::from([(
+            "report.rb".to_owned(),
+            FileSelection {
+                match_count: 1,
+                is_target: false,
+            },
+        )]);
+
+        let files = collect_file_results(&directory, &selections, &Regex::new("Report").unwrap());
+
+        fs::remove_dir_all(directory).unwrap();
+        assert_eq!(files[0].content.as_deref(), Some("class Report\nend\n"));
+    }
+
+    #[test]
+    fn path_match_ranges_include_directories_and_use_character_offsets() {
+        let matches = path_match_ranges("app/mañana_service.rb", &Regex::new("ña|app").unwrap());
+
+        assert_eq!(
+            matches,
+            vec![
+                PathMatch {
+                    component_index: 0,
+                    start: 0,
+                    end: 3,
+                },
+                PathMatch {
+                    component_index: 1,
+                    start: 2,
+                    end: 4,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn matching_directory_targets_every_descendant_file() {
+        let targets = find_path_targets(
+            &[
+                PathBuf::from("packs/payments/app/client.rb"),
+                PathBuf::from("packs/payments/lib/worker.rb"),
+                PathBuf::from("packs/hr/app/employee.rb"),
+            ],
+            &Regex::new("payments").unwrap(),
+        );
+
+        assert_eq!(
+            targets,
+            BTreeSet::from([
+                "packs/payments/app/client.rb".to_owned(),
+                "packs/payments/lib/worker.rb".to_owned(),
+            ])
+        );
     }
 
     #[test]
@@ -1216,11 +1307,11 @@ mod tests {
         assert!(diagram.contains("class N0 target"));
         assert!(!diagram.contains("-->"));
 
-        let filename_diagram = mermaid(&graph, MapMode::Filenames);
-        assert!(filename_diagram.contains("N0[\"client.rb\"]"));
-        assert!(!filename_diagram.contains("◆"));
-        assert!(!filename_diagram.contains("(1)"));
-        assert!(!filename_diagram.contains("classDef target"));
+        let path_diagram = mermaid(&graph, MapMode::Paths);
+        assert!(path_diagram.contains("N0[\"client.rb\"]"));
+        assert!(!path_diagram.contains("◆"));
+        assert!(!path_diagram.contains("(1)"));
+        assert!(!path_diagram.contains("classDef target"));
     }
 
     #[test]

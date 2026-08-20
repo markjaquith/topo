@@ -1,5 +1,9 @@
 # topo
 
+```sh
+cargo install topo-scan
+```
+
 `topo` keeps its configuration and generated maps in a **workspace**: the
 current directory where you run it. The scanned repository can live elsewhere.
 
@@ -33,14 +37,16 @@ topo map 'AdminUser' --dir ~/workspace/zenpayroll
 
 ## Map modes
 
-`--mode` controls whether the regex selects basenames, contents, or both:
+`--mode` controls whether the regex selects path components, contents, or both:
 
 | Mode | Selected files |
 | --- | --- |
-| `all` (default) | Matching basenames and content matches |
-| `filenames` | Matching basenames only; skips the content search |
-| `contents` | Content matches only; basenames are not considered |
-| `sprinkles` | Content matches whose basename does not match |
+| `all` (default) | Matching paths and content matches |
+| `paths` | Matching path components only; skips the content search |
+| `contents` | Content matches only; paths are not considered |
+| `sprinkles` | Content matches whose path does not match |
+
+`filenames` remains accepted as a compatibility alias for `paths`.
 
 Without `topo.toml`, topo preserves the original behavior: the positional regex
 is required and the current directory is scanned. Topo updates one stderr
@@ -63,7 +69,8 @@ db/schema.rb
 The report JSON contains the workspace directory, scan directory, repository
 root, regex, timestamp, every occurrence, matching files, and directory graph
 nodes. Each matching file has an `is_target` flag when its basename matches the
-regex. The Mermaid sidecar groups matching files by directories with direct
+regex and includes its complete UTF-8 source text (non-text files omit source
+text). The Mermaid sidecar groups matching files by directories with direct
 matches, labels each group with its full collapsed path segments relative to the nearest visible parent, and renders targets
 with a `◆` marker plus an amber fill and border. It has the same filename and a
 `.mmd` extension and is written alongside the JSON.
@@ -80,5 +87,7 @@ topo view zenpayroll.123.topo.json
 
 It opens a browser at an ephemeral `127.0.0.1` address and serves only that
 report. The viewer provides a searchable directory tree, target/sprinkle
-filters, summary counts, and matching-line detail. Use `--no-open` to print
-the URL without launching a browser.
+filters, summary counts, and syntax-highlighted source. It initially shows
+matching lines with one line of context; click a collapsed line range to reveal
+it. Ruby is highlighted out of the box, with plaintext fallback for unknown
+file types. Use `--no-open` to print the URL without launching a browser.
