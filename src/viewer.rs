@@ -289,7 +289,7 @@ const VIEWER_HTML: &str = r##"<!doctype html>
 
     function setupSidebarResize() {
       const handle = document.querySelector('#resize-handle');
-      const minimum = 280;
+      const minimum = 480;
       const maximum = () => Math.max(minimum, window.innerWidth - 320);
       const setWidth = (width, persist = false) => {
         const clamped = Math.max(minimum, Math.min(maximum(), width));
