@@ -163,12 +163,19 @@ fn run() -> Result<(), String> {
         .map_err(|error| format!("could not write {}: {error}", mermaid_output.display()))?;
 
     clear_status();
+    let home = env::var_os("HOME").map(PathBuf::from);
     println!(
-        "Found {} occurrences in {} files. Wrote {} and {}.",
-        report.matches.len(),
-        report.files.len(),
-        output.display(),
-        mermaid_output.display()
+        "󰈤  {} occurrences in {} files",
+        format_number(report.matches.len()),
+        format_number(report.files.len())
+    );
+    println!(
+        "󰈙  {}",
+        display_path(&output, &search_directory, home.as_deref())
+    );
+    println!(
+        "󰈙  {}",
+        display_path(&mermaid_output, &search_directory, home.as_deref())
     );
     Ok(())
 }
@@ -533,6 +540,44 @@ fn mermaid(graph: &Graph) -> String {
     result
 }
 
+fn display_path(path: &Path, current_directory: &Path, home: Option<&Path>) -> String {
+    let absolute_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        current_directory.join(path)
+    };
+    if absolute_path.parent() == Some(current_directory) {
+        return absolute_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_owned();
+    }
+    if let Some(home) = home {
+        if let Ok(relative_path) = absolute_path.strip_prefix(home) {
+            return if relative_path.as_os_str().is_empty() {
+                "~".to_owned()
+            } else {
+                format!("~/{}", relative_path.display())
+            };
+        }
+    }
+    absolute_path.display().to_string()
+}
+
+fn format_number(number: usize) -> String {
+    let digits = number.to_string();
+    let first_group_length = digits.len() % 3;
+    let mut formatted = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.char_indices() {
+        if index != 0 && (index - first_group_length) % 3 == 0 {
+            formatted.push(',');
+        }
+        formatted.push(digit);
+    }
+    formatted
+}
+
 fn default_filename(search_directory: &Path, timestamp: u64) -> String {
     let basename = search_directory
         .file_name()
@@ -581,5 +626,27 @@ mod tests {
             default_filename(Path::new("/work/topo"), 42),
             "topo.42.topo.json"
         );
+    }
+
+    #[test]
+    fn formats_summary_paths_compactly() {
+        let current_directory = Path::new("/Users/test/workspace/project");
+        assert_eq!(
+            display_path(
+                Path::new("project.42.topo.json"),
+                current_directory,
+                Some(Path::new("/Users/test"))
+            ),
+            "project.42.topo.json"
+        );
+        assert_eq!(
+            display_path(
+                Path::new("/Users/test/elsewhere/report.topo.json"),
+                current_directory,
+                Some(Path::new("/Users/test"))
+            ),
+            "~/elsewhere/report.topo.json"
+        );
+        assert_eq!(format_number(8143), "8,143");
     }
 }
