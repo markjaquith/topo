@@ -93,7 +93,8 @@ const VIEWER_HTML: &str = r##"<!doctype html>
         <input id="query" type="search" placeholder="Filter files and directories">
         <div class="filters">
           <button class="filter active" data-filter="all">All</button>
-          <button class="filter" data-filter="targets">Targets</button>
+          <button class="filter" data-filter="filenames">Filenames</button>
+          <button class="filter" data-filter="content">Content</button>
           <button class="filter" data-filter="sprinkles">Sprinkles</button>
           <button class="tree-control" id="tree-control" type="button">Expand all</button>
         </div>
@@ -282,7 +283,8 @@ const VIEWER_HTML: &str = r##"<!doctype html>
     function matchesFilter(file) {
       const query = state.query.trim().toLowerCase();
       if (query && !file.path.toLowerCase().includes(query)) return false;
-      if (state.filter === 'targets') return file.is_target;
+      if (state.filter === 'filenames') return file.is_target;
+      if (state.filter === 'content') return file.match_count > 0;
       if (state.filter === 'sprinkles') return !file.is_target && file.match_count > 0;
       return true;
     }
@@ -511,7 +513,8 @@ mod tests {
         assert!(VIEWER_HTML.contains("<div class=\"brand\">TOPO</div>"));
         assert!(VIEWER_HTML.contains("id=\"tree\""));
         assert!(VIEWER_HTML.contains("id=\"detail\""));
-        assert!(VIEWER_HTML.contains("data-filter=\"targets\""));
+        assert!(VIEWER_HTML.contains("data-filter=\"filenames\">Filenames"));
+        assert!(VIEWER_HTML.contains("data-filter=\"content\">Content"));
         assert!(VIEWER_HTML.contains("id=\"tree-control\""));
         assert!(VIEWER_HTML.contains("id=\"resize-handle\""));
         assert!(VIEWER_HTML.contains("localStorage.setItem(SIDEBAR_WIDTH_KEY"));
