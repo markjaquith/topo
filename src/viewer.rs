@@ -96,7 +96,7 @@ const VIEWER_HTML: &str = r##"<!doctype html>
           <button class="filter" data-filter="filenames">Filenames</button>
           <button class="filter" data-filter="content">Content</button>
           <button class="filter" data-filter="sprinkles">Sprinkles</button>
-          <button class="tree-control" id="tree-control" type="button">Expand all</button>
+          <button class="tree-control" id="tree-control" type="button">Expand&nbsp;all</button>
         </div>
       </div>
       <div id="tree"></div>
@@ -364,7 +364,7 @@ const VIEWER_HTML: &str = r##"<!doctype html>
       const paths = directoryPaths(root);
       const control = document.querySelector('#tree-control');
       const allExpanded = paths.length > 0 && paths.every(path => state.expanded.has(path));
-      control.textContent = allExpanded ? 'Collapse all' : 'Expand all';
+      control.textContent = allExpanded ? 'Collapse\u00A0all' : 'Expand\u00A0all';
       control.disabled = paths.length === 0;
     }
 
