@@ -154,26 +154,83 @@ const VIEWER_HTML: &str = r##"<!doctype html>
       return [lerp(points[from][0], points[to][0], amount), lerp(points[from][1], points[to][1], amount)];
     }
 
+    function pointKey([x, y]) { return `${Math.round(x * 100)}:${Math.round(y * 100)}`; }
+    function midpoint([x1, y1], [x2, y2]) { return [(x1 + x2) / 2, (y1 + y2) / 2]; }
+
+    function stitchSegments(segments) {
+      const endpoints = new Map();
+      segments.forEach((segment, segmentIndex) => segment.forEach((point, endpointIndex) => {
+        const key = pointKey(point);
+        if (!endpoints.has(key)) endpoints.set(key, []);
+        endpoints.get(key).push([segmentIndex, endpointIndex]);
+      }));
+      const visited = new Set();
+      const takeConnection = key => (endpoints.get(key) || []).find(([segmentIndex]) => !visited.has(segmentIndex));
+      const paths = [];
+      for (let index = 0; index < segments.length; index++) {
+        if (visited.has(index)) continue;
+        visited.add(index);
+        const points = [...segments[index]];
+        const extend = fromEnd => {
+          while (true) {
+            const endpoint = fromEnd ? points[points.length - 1] : points[0];
+            const connection = takeConnection(pointKey(endpoint));
+            if (!connection) return;
+            const [segmentIndex, endpointIndex] = connection;
+            visited.add(segmentIndex);
+            const next = segments[segmentIndex][endpointIndex === 0 ? 1 : 0];
+            if (fromEnd) points.push(next);
+            else points.unshift(next);
+          }
+        };
+        extend(true);
+        extend(false);
+        paths.push(points);
+      }
+      return paths;
+    }
+
+    function drawSmoothPath(context, points) {
+      if (points.length < 2) return;
+      const closed = points.length > 3 && pointKey(points[0]) === pointKey(points[points.length - 1]);
+      if (closed) {
+        const loop = points.slice(0, -1);
+        context.moveTo(...midpoint(loop[loop.length - 1], loop[0]));
+        for (let index = 0; index < loop.length; index++) {
+          context.quadraticCurveTo(...loop[index], ...midpoint(loop[index], loop[(index + 1) % loop.length]));
+        }
+        context.closePath();
+        return;
+      }
+      context.moveTo(...points[0]);
+      for (let index = 1; index < points.length - 1; index++) {
+        context.quadraticCurveTo(...points[index], ...midpoint(points[index], points[index + 1]));
+      }
+      context.lineTo(...points[points.length - 1]);
+    }
+
     function drawContours(context, values, columns, rows, cellWidth, cellHeight, levels, color, alpha) {
       context.strokeStyle = `rgba(${color}, ${alpha})`;
       context.lineWidth = 1;
       context.lineJoin = 'round';
       context.lineCap = 'round';
       for (const level of levels) {
-        context.beginPath();
+        const segments = [];
         for (let row = 0; row < rows - 1; row++) {
           for (let column = 0; column < columns - 1; column++) {
             const cell = [values[row][column], values[row][column + 1], values[row + 1][column + 1], values[row + 1][column]];
             const index = (cell[0] >= level ? 1 : 0) | (cell[1] >= level ? 2 : 0) | (cell[2] >= level ? 4 : 0) | (cell[3] >= level ? 8 : 0);
             for (const [start, end] of contourCases[index]) {
               const x = column * cellWidth, y = row * cellHeight;
-              const from = edgePoint(start, x, y, cellWidth, cellHeight, cell, level);
-              const to = edgePoint(end, x, y, cellWidth, cellHeight, cell, level);
-              context.moveTo(...from);
-              context.lineTo(...to);
+              segments.push([
+                edgePoint(start, x, y, cellWidth, cellHeight, cell, level),
+                edgePoint(end, x, y, cellWidth, cellHeight, cell, level),
+              ]);
             }
           }
         }
+        context.beginPath();
+        for (const path of stitchSegments(segments)) drawSmoothPath(context, path);
         context.stroke();
       }
     }
@@ -511,6 +568,8 @@ mod tests {
         assert!(VIEWER_HTML.contains("<title>TOPO</title>"));
         assert!(VIEWER_HTML.contains("id=\"topography\""));
         assert!(VIEWER_HTML.contains("drawContours"));
+        assert!(VIEWER_HTML.contains("stitchSegments"));
+        assert!(VIEWER_HTML.contains("quadraticCurveTo"));
         assert!(VIEWER_HTML.contains("context.lineJoin = 'round'"));
         assert!(VIEWER_HTML.contains("context.lineCap = 'round'"));
         assert!(VIEWER_HTML.contains("prefers-reduced-motion"));
