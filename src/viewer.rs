@@ -157,6 +157,8 @@ const VIEWER_HTML: &str = r##"<!doctype html>
     function drawContours(context, values, columns, rows, cellWidth, cellHeight, levels, color, alpha) {
       context.strokeStyle = `rgba(${color}, ${alpha})`;
       context.lineWidth = 1;
+      context.lineJoin = 'round';
+      context.lineCap = 'round';
       for (const level of levels) {
         context.beginPath();
         for (let row = 0; row < rows - 1; row++) {
@@ -509,6 +511,8 @@ mod tests {
         assert!(VIEWER_HTML.contains("<title>TOPO</title>"));
         assert!(VIEWER_HTML.contains("id=\"topography\""));
         assert!(VIEWER_HTML.contains("drawContours"));
+        assert!(VIEWER_HTML.contains("context.lineJoin = 'round'"));
+        assert!(VIEWER_HTML.contains("context.lineCap = 'round'"));
         assert!(VIEWER_HTML.contains("prefers-reduced-motion"));
         assert!(VIEWER_HTML.contains("<div class=\"brand\">TOPO</div>"));
         assert!(VIEWER_HTML.contains("id=\"tree\""));
