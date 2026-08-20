@@ -50,6 +50,8 @@ const VIEWER_HTML: &str = r##"<!doctype html>
     .toolbar { position: sticky; top: -16px; padding: 16px 0 12px; background: rgba(23,30,43,.96); z-index: 1; }
     input { width: 100%; padding: 9px 10px; color: var(--text); border: 1px solid var(--line); border-radius: 6px; background: var(--bg); outline: none; }
     input:focus { border-color: var(--accent); }
+    .filter-hint { margin-top: 7px; color: var(--muted); font-size: 11px; }
+    .filter-hint code { color: var(--accent); }
     .filters { display: flex; gap: 6px; margin-top: 9px; }
     .filter, .tree-control { padding: 5px 9px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; background: transparent; cursor: pointer; }
     .filter.active { color: #06131c; border-color: var(--accent); background: var(--accent); }
@@ -90,7 +92,8 @@ const VIEWER_HTML: &str = r##"<!doctype html>
   <main>
     <aside>
       <div class="toolbar">
-        <input id="query" type="search" placeholder="Filter files and directories">
+        <input id="query" type="search" placeholder="Filter paths or hits<2">
+        <div class="filter-hint">Path text · <code>hits&lt;2</code> · <code>hits&gt;=1</code></div>
         <div class="filters">
           <button class="filter active" data-filter="all">All</button>
           <button class="filter" data-filter="filenames">Filenames</button>
@@ -105,7 +108,7 @@ const VIEWER_HTML: &str = r##"<!doctype html>
     <section class="detail" id="detail"></section>
   </main>
   <script>
-    const state = { report: null, query: '', filter: 'all', selected: null, expanded: new Set(), treeInitialized: false };
+    const state = { report: null, query: '', filterSpec: { text: '', hitRestrictions: [] }, filter: 'all', selected: null, expanded: new Set(), treeInitialized: false };
     const HOME_DIRECTORY = __TOPO_HOME__;
     const byFile = new Map();
     const escapeHtml = value => String(value).replace(/[&<>'"]/g, character => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[character]));
@@ -352,9 +355,27 @@ const VIEWER_HTML: &str = r##"<!doctype html>
       return root;
     }
 
+    function parseFilter(query) {
+      const hitRestrictions = [];
+      const text = query.replace(/(?:^|\s)hits(<=|>=|=|<|>)(\d+)(?=\s|$)/gi, (_, operator, value) => {
+        hitRestrictions.push({ operator, value: Number(value) });
+        return ' ';
+      }).trim().toLowerCase();
+      return { text, hitRestrictions };
+    }
+
+    function matchesHitRestriction(hitCount, { operator, value }) {
+      if (operator === '<') return hitCount < value;
+      if (operator === '<=') return hitCount <= value;
+      if (operator === '=') return hitCount === value;
+      if (operator === '>') return hitCount > value;
+      return hitCount >= value;
+    }
+
     function matchesFilter(file) {
-      const query = state.query.trim().toLowerCase();
-      if (query && !file.path.toLowerCase().includes(query)) return false;
+      const { text, hitRestrictions } = state.filterSpec;
+      if (text && !file.path.toLowerCase().includes(text)) return false;
+      if (!hitRestrictions.every(restriction => matchesHitRestriction(file.match_count, restriction))) return false;
       if (state.filter === 'filenames') return file.is_target;
       if (state.filter === 'content') return file.match_count > 0;
       if (state.filter === 'sprinkles') return !file.is_target && file.match_count > 0;
@@ -448,6 +469,25 @@ const VIEWER_HTML: &str = r##"<!doctype html>
         <div class="stat"><b>${number(sprinkles)}</b><span>sprinkle files</span></div>`;
     }
 
+    function filterFromUrl() {
+      return new URLSearchParams(window.location.search).get('filter') || '';
+    }
+
+    function writeFilterToUrl() {
+      const url = new URL(window.location);
+      if (state.query) url.searchParams.set('filter', state.query);
+      else url.searchParams.delete('filter');
+      history.replaceState(null, '', url);
+    }
+
+    function setQuery(query, writeUrl = false) {
+      state.query = query;
+      state.filterSpec = parseFilter(query);
+      document.querySelector('#query').value = query;
+      if (writeUrl) writeFilterToUrl();
+      renderTree();
+    }
+
     async function boot() {
       try {
         state.report = await fetch('/report.json').then(response => {
@@ -460,9 +500,13 @@ const VIEWER_HTML: &str = r##"<!doctype html>
           byFile.get(match.file).push(match);
         }
         renderHeader();
+        state.query = filterFromUrl();
+        state.filterSpec = parseFilter(state.query);
+        document.querySelector('#query').value = state.query;
         renderTree();
         renderDetail();
-        document.querySelector('#query').addEventListener('input', event => { state.query = event.target.value; renderTree(); });
+        document.querySelector('#query').addEventListener('input', event => setQuery(event.target.value, true));
+        window.addEventListener('popstate', () => setQuery(filterFromUrl()));
         document.querySelectorAll('.filter').forEach(button => button.addEventListener('click', () => {
           state.filter = button.dataset.filter;
           document.querySelectorAll('.filter').forEach(candidate => candidate.classList.toggle('active', candidate === button));
@@ -592,6 +636,9 @@ mod tests {
         assert!(VIEWER_HTML.contains("id=\"detail\""));
         assert!(VIEWER_HTML.contains("data-filter=\"filenames\">Filenames"));
         assert!(VIEWER_HTML.contains("data-filter=\"content\">Content"));
+        assert!(VIEWER_HTML.contains("hits&lt;2"));
+        assert!(VIEWER_HTML.contains("new URLSearchParams(window.location.search)"));
+        assert!(VIEWER_HTML.contains("history.replaceState"));
         assert!(VIEWER_HTML.contains("id=\"tree-control\""));
         assert!(VIEWER_HTML.contains("id=\"resize-handle\""));
         assert!(VIEWER_HTML.contains("localStorage.setItem(SIDEBAR_WIDTH_KEY"));
