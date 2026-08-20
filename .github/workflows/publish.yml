@@ -1,0 +1,25 @@
+name: Publish
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify tag matches the package version
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          package_version="$(awk -F'"' '/^version =/ { print $2; exit }' Cargo.toml)"
+          test "$tag_version" = "$package_version"
+      - name: Publish to crates.io
+        run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
