@@ -8,8 +8,8 @@ cargo install topo-scan
 current directory where you run it. The scanned repository can live elsewhere.
 
 ```sh
-mkdir -p ~/topo/zenpayroll
-cd ~/topo/zenpayroll
+mkdir -p ~/Dev/topo-workspace
+cd ~/Dev/topo-workspace
 topo map
 ```
 
@@ -19,7 +19,7 @@ A workspace `topo.toml` specifies the default repository and regex:
 
 ```toml
 version = 1
-scan_dir = "~/workspace/zenpayroll"
+scan_dir = "~/Dev/my-project"
 pattern = "UserService"
 ```
 
@@ -32,7 +32,7 @@ regex ripgrep can compile.
 overrides:
 
 ```sh
-topo map 'AdminUser' --dir ~/workspace/zenpayroll
+topo map 'AdminUser' --dir ~/Dev/my-project
 ```
 
 ## Map modes
@@ -70,10 +70,7 @@ The report JSON contains the workspace directory, scan directory, repository
 root, regex, timestamp, every occurrence, matching files, and directory graph
 nodes. Each matching file has an `is_target` flag when its basename matches the
 regex and includes its complete UTF-8 source text (non-text files omit source
-text). The Mermaid sidecar groups matching files by directories with direct
-matches, labels each group with its full collapsed path segments relative to the nearest visible parent, and renders targets
-with a `◆` marker plus an amber fill and border. It has the same filename and a
-`.mmd` extension and is written alongside the JSON.
+text).
 Without `--output`, the report is named
 `<scan-dir-basename>.<unix-timestamp>.topo.json` in the workspace.
 
@@ -82,7 +79,7 @@ Without `--output`, the report is named
 Browse a report with the built-in local web viewer:
 
 ```sh
-topo view zenpayroll.123.topo.json
+topo view my-project.123.topo.json
 ```
 
 It opens a browser at an ephemeral `127.0.0.1` address and serves only that
