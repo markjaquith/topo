@@ -97,15 +97,22 @@ struct Edge {
 }
 
 fn main() {
-    if let Err(error) = run() {
+    let arguments = env::args().skip(1).collect::<Vec<_>>();
+    if arguments.is_empty()
+        || matches!(arguments.first().map(String::as_str), Some("--help" | "-h"))
+    {
+        print!("{}", main_help());
+        return;
+    }
+    if let Err(error) = run(arguments) {
         clear_status();
         eprintln!("topo: {error}");
         std::process::exit(1);
     }
 }
 
-fn run() -> Result<(), String> {
-    let options = parse_args(env::args().skip(1).collect())?;
+fn run(arguments: Vec<String>) -> Result<(), String> {
+    let options = parse_args(arguments)?;
     let workspace_directory = env::current_dir().map_err(|error| error.to_string())?;
     let workspace_config = load_workspace_config(&workspace_directory)?;
     let pattern = options
@@ -251,6 +258,13 @@ fn parse_args(args: Vec<String>) -> Result<Options, String> {
         output,
         scan_directory,
     })
+}
+
+fn main_help() -> String {
+    format!(
+        "████████╗ ██████╗ ██████╗  ██████╗\n╚══██╔══╝██╔═══██╗██╔══██╗██╔═══██╗\n   ██║   ██║   ██║██████╔╝██║   ██║\n   ██║   ██║   ██║██╔═══╝ ██║   ██║\n   ██║   ╚██████╔╝██║     ╚██████╔╝\n   ╚═╝    ╚═════╝ ╚═╝      ╚═════╝\n\n  Code topology maps  •  v{}\n\nUSAGE\n  topo map [<regex>] [--dir <scan-directory>] [--output <filename>]\n\nCOMMANDS\n  map       Search Git-tracked code and write JSON + Mermaid maps\n\nWORKSPACE\n  topo map                 Use the pattern and directory in topo.toml\n  topo map 'UserService'   Override the configured regex\n\nOPTIONS\n  -h, --help               Show this help\n",
+        env!("CARGO_PKG_VERSION")
+    )
 }
 
 fn usage() -> String {
@@ -827,6 +841,14 @@ fn clear_status() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn main_help_introduces_topo() {
+        let help = main_help();
+        assert!(help.starts_with("████████╗"));
+        assert!(help.contains("Code topology maps"));
+        assert!(help.contains("topo map [<regex>]"));
+    }
 
     #[test]
     fn extracts_imports_for_the_file_language() {
