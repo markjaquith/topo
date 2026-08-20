@@ -56,10 +56,10 @@ const VIEWER_HTML: &str = r##"<!doctype html>
     .tree-control { margin-left: auto; }
     .tree-control:disabled { cursor: default; opacity: .45; }
     details { margin: 2px 0; }
-    summary { cursor: pointer; color: #cbd5e1; list-style: none; }
+    summary { display: flex; align-items: center; cursor: pointer; color: #cbd5e1; list-style: none; }
     summary::-webkit-details-marker { display: none; }
-    summary::before { content: '›'; display: inline-block; width: 14px; color: var(--muted); transition: transform .1s; }
-    details[open] > summary::before { transform: rotate(90deg); }
+    summary::before { width: 7px; height: 7px; flex: 0 0 auto; margin: 0 8px 0 3px; border-right: 1.5px solid var(--muted); border-bottom: 1.5px solid var(--muted); content: ''; transform: rotate(-45deg); transform-origin: 50% 50%; transition: transform .12s ease; }
+    details[open] > summary::before { transform: rotate(45deg); }
     .directory-count { color: var(--muted); font-size: 11px; }
     .children { margin-left: 14px; border-left: 1px solid #283244; padding-left: 8px; }
     .file { display: flex; width: 100%; gap: 8px; align-items: center; padding: 5px 7px; color: var(--text); border: 1px solid transparent; border-radius: 5px; background: transparent; text-align: left; cursor: pointer; }
