@@ -1,5 +1,5 @@
 use std::{
-    fs,
+    env, fs,
     io::{BufRead, BufReader, Write},
     net::{TcpListener, TcpStream},
     path::PathBuf,
@@ -94,9 +94,11 @@ const VIEWER_HTML: &str = r##"<!doctype html>
   </main>
   <script>
     const state = { report: null, query: '', filter: 'all', selected: null, expanded: new Set(), treeInitialized: false };
+    const HOME_DIRECTORY = __TOPO_HOME__;
     const byFile = new Map();
     const escapeHtml = value => String(value).replace(/[&<>'"]/g, character => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[character]));
     const number = value => new Intl.NumberFormat().format(value);
+    const displayPath = path => HOME_DIRECTORY && (path === HOME_DIRECTORY || path.startsWith(`${HOME_DIRECTORY}/`)) ? `~${path.slice(HOME_DIRECTORY.length)}` : path;
 
     function buildTree(files) {
       const root = { name: '', path: '', dirs: new Map(), files: [] };
@@ -177,7 +179,7 @@ const VIEWER_HTML: &str = r##"<!doctype html>
       const metadata = state.report.metadata;
       document.querySelector('#context').innerHTML = `
         <span>Pattern <strong>${escapeHtml(metadata.regex)}</strong></span>
-        <span>Directory ${escapeHtml(metadata.scan_directory)}</span>
+        <span>Directory ${escapeHtml(displayPath(metadata.scan_directory))}</span>
         <span>mode <strong>${escapeHtml(metadata.mode)}</strong></span>`;
       const files = state.report.files;
       const targets = files.filter(file => file.is_target).length;
@@ -230,6 +232,7 @@ pub fn run(report_path: PathBuf, open_browser: bool) -> Result<(), String> {
     serde_json::from_slice::<Value>(&report)
         .map_err(|error| format!("{} is not valid JSON: {error}", report_path.display()))?;
 
+    let home_directory = env::var("HOME").ok();
     let listener = TcpListener::bind("127.0.0.1:0")
         .map_err(|error| format!("could not start local viewer: {error}"))?;
     let address = listener
@@ -248,14 +251,14 @@ pub fn run(report_path: PathBuf, open_browser: bool) -> Result<(), String> {
 
     for stream in listener.incoming() {
         match stream {
-            Ok(stream) => handle_connection(stream, &report),
+            Ok(stream) => handle_connection(stream, &report, home_directory.as_deref()),
             Err(error) => eprintln!("topo: viewer connection failed: {error}"),
         }
     }
     Ok(())
 }
 
-fn handle_connection(mut stream: TcpStream, report: &[u8]) {
+fn handle_connection(mut stream: TcpStream, report: &[u8], home_directory: Option<&str>) {
     let mut request_line = String::new();
     {
         let mut reader = BufReader::new(&mut stream);
@@ -271,12 +274,15 @@ fn handle_connection(mut stream: TcpStream, report: &[u8]) {
         .next()
         .unwrap_or("/");
     match path {
-        "/" => write_response(
-            &mut stream,
-            "200 OK",
-            "text/html; charset=utf-8",
-            VIEWER_HTML.as_bytes(),
-        ),
+        "/" => {
+            let html = viewer_html(home_directory);
+            write_response(
+                &mut stream,
+                "200 OK",
+                "text/html; charset=utf-8",
+                html.as_bytes(),
+            )
+        }
         "/report.json" => write_response(&mut stream, "200 OK", "application/json", report),
         "/favicon.ico" => write_response(&mut stream, "204 No Content", "text/plain", &[]),
         _ => write_response(
@@ -286,6 +292,11 @@ fn handle_connection(mut stream: TcpStream, report: &[u8]) {
             b"Not found",
         ),
     }
+}
+
+fn viewer_html(home_directory: Option<&str>) -> String {
+    let home = serde_json::to_string(&home_directory).expect("home directory serializes");
+    VIEWER_HTML.replace("__TOPO_HOME__", &home)
 }
 
 fn write_response(stream: &mut TcpStream, status: &str, content_type: &str, body: &[u8]) {
@@ -308,5 +319,8 @@ mod tests {
         assert!(VIEWER_HTML.contains("data-filter=\"targets\""));
         assert!(VIEWER_HTML.contains("state.expanded"));
         assert!(!VIEWER_HTML.contains('◆'));
+        assert!(
+            viewer_html(Some("/Users/test")).contains(r#"const HOME_DIRECTORY = "/Users/test";"#)
+        );
     }
 }
