@@ -653,8 +653,12 @@ fn write_directory_tree(
     indent: usize,
 ) {
     for node in &tree.files {
-        let label = node.label.rsplit('/').next().unwrap_or(&node.label);
-        write_mermaid_node(result, node, node_names, indent, label);
+        let filename = node.label.rsplit('/').next().unwrap_or(&node.label);
+        let label = match node.match_count {
+            Some(match_count) => format!("{filename} ({})", format_number(match_count)),
+            None => filename.to_owned(),
+        };
+        write_mermaid_node(result, node, node_names, indent, &label);
     }
     for (directory, child) in &tree.directories {
         let directory_id = format!("D{next_directory_id}");
@@ -896,7 +900,7 @@ mod tests {
         assert!(diagram.contains("subgraph D2[\"app\"]"));
         assert!(diagram.contains("subgraph D3[\"lib\"]"));
         assert!(diagram.contains("subgraph D4[\"src\"]"));
-        assert!(diagram.contains("N0[\"client.rb\"]"));
+        assert!(diagram.contains("N0[\"client.rb (1)\"]"));
         assert!(!diagram.contains("-->"));
     }
 
