@@ -45,8 +45,10 @@ const VIEWER_HTML: &str = r##"<!doctype html>
     input { width: 100%; padding: 9px 10px; color: var(--text); border: 1px solid var(--line); border-radius: 6px; background: var(--bg); outline: none; }
     input:focus { border-color: var(--accent); }
     .filters { display: flex; gap: 6px; margin-top: 9px; }
-    .filter { padding: 5px 9px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; background: transparent; cursor: pointer; }
+    .filter, .tree-control { padding: 5px 9px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; background: transparent; cursor: pointer; }
     .filter.active { color: #06131c; border-color: var(--accent); background: var(--accent); }
+    .tree-control { margin-left: auto; }
+    .tree-control:disabled { cursor: default; opacity: .45; }
     details { margin: 2px 0; }
     summary { cursor: pointer; color: #cbd5e1; list-style: none; }
     summary::-webkit-details-marker { display: none; }
@@ -86,6 +88,7 @@ const VIEWER_HTML: &str = r##"<!doctype html>
           <button class="filter active" data-filter="all">All</button>
           <button class="filter" data-filter="targets">Targets</button>
           <button class="filter" data-filter="sprinkles">Sprinkles</button>
+          <button class="tree-control" id="tree-control" type="button">Expand all</button>
         </div>
       </div>
       <div id="tree"></div>
@@ -127,6 +130,22 @@ const VIEWER_HTML: &str = r##"<!doctype html>
       return node.files.filter(matchesFilter).length + [...node.dirs.values()].reduce((sum, child) => sum + visibleFileCount(child), 0);
     }
 
+    function directoryPaths(node, paths = []) {
+      for (const child of node.dirs.values()) {
+        paths.push(child.path);
+        directoryPaths(child, paths);
+      }
+      return paths;
+    }
+
+    function updateTreeControl(root) {
+      const paths = directoryPaths(root);
+      const control = document.querySelector('#tree-control');
+      const allExpanded = paths.length > 0 && paths.every(path => state.expanded.has(path));
+      control.textContent = allExpanded ? 'Collapse all' : 'Expand all';
+      control.disabled = paths.length === 0;
+    }
+
     function renderTreeNode(node) {
       const directFiles = node.files.filter(matchesFilter).sort((a, b) => a.filename.localeCompare(b.filename));
       const directories = [...node.dirs.values()].filter(child => visibleFileCount(child) > 0).sort((a, b) => a.name.localeCompare(b.name));
@@ -150,9 +169,11 @@ const VIEWER_HTML: &str = r##"<!doctype html>
         state.treeInitialized = true;
       }
       document.querySelector('#tree').innerHTML = renderTreeNode(root) || '<div class="empty">No matching files</div>';
+      updateTreeControl(root);
       document.querySelectorAll('details[data-path]').forEach(details => details.addEventListener('toggle', () => {
         if (details.open) state.expanded.add(details.dataset.path);
         else state.expanded.delete(details.dataset.path);
+        updateTreeControl(root);
       }));
       document.querySelectorAll('.file').forEach(button => button.addEventListener('click', () => {
         state.selected = button.dataset.path;
@@ -211,6 +232,12 @@ const VIEWER_HTML: &str = r##"<!doctype html>
           document.querySelectorAll('.filter').forEach(candidate => candidate.classList.toggle('active', candidate === button));
           renderTree();
         }));
+        document.querySelector('#tree-control').addEventListener('click', () => {
+          const paths = directoryPaths(buildTree(state.report.files));
+          if (paths.every(path => state.expanded.has(path))) state.expanded.clear();
+          else state.expanded = new Set(paths);
+          renderTree();
+        });
       } catch (error) {
         document.body.innerHTML = `<pre class="empty">Could not load topo report: ${escapeHtml(error.message)}</pre>`;
       }
@@ -317,6 +344,7 @@ mod tests {
         assert!(VIEWER_HTML.contains("id=\"tree\""));
         assert!(VIEWER_HTML.contains("id=\"detail\""));
         assert!(VIEWER_HTML.contains("data-filter=\"targets\""));
+        assert!(VIEWER_HTML.contains("id=\"tree-control\""));
         assert!(VIEWER_HTML.contains("state.expanded"));
         assert!(!VIEWER_HTML.contains('◆'));
         assert!(
