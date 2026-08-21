@@ -141,6 +141,13 @@ fn main() {
         print!("{}", main_help());
         return;
     }
+    if matches!(
+        arguments.first().map(String::as_str),
+        Some("--version" | "-v")
+    ) {
+        print!("{}", version());
+        return;
+    }
     if arguments.first().is_some_and(|argument| argument == "view")
         && matches!(arguments.get(1).map(String::as_str), Some("--help" | "-h"))
     {
@@ -358,9 +365,13 @@ fn parse_args(args: Vec<String>) -> Result<Options, String> {
 
 fn main_help() -> String {
     format!(
-        "████████╗ ██████╗ ██████╗  ██████╗\n╚══██╔══╝██╔═══██╗██╔══██╗██╔═══██╗\n   ██║   ██║   ██║██████╔╝██║   ██║\n   ██║   ██║   ██║██╔═══╝ ██║   ██║\n   ██║   ╚██████╔╝██║     ╚██████╔╝\n   ╚═╝    ╚═════╝ ╚═╝      ╚═════╝\n\n  Code topology maps  •  v{}\n\nUSAGE\n  topo map [<regex>] [--dir <scan-directory>] [--mode <mode>] [--output <filename>]\n\nCOMMANDS\n  map       Search Git-tracked code and write JSON + Mermaid maps\n  view      Browse a JSON map in a local web viewer\n\nWORKSPACE\n  topo map                 Use the pattern and directory in topo.toml\n  topo map 'UserService'   Override the configured regex\n\nOPTIONS\n  --mode <mode>            all (default), paths, contents, or sprinkles (`filenames` aliases paths)\n  -h, --help               Show this help\n",
+        "████████╗ ██████╗ ██████╗  ██████╗\n╚══██╔══╝██╔═══██╗██╔══██╗██╔═══██╗\n   ██║   ██║   ██║██████╔╝██║   ██║\n   ██║   ██║   ██║██╔═══╝ ██║   ██║\n   ██║   ╚██████╔╝██║     ╚██████╔╝\n   ╚═╝    ╚═════╝ ╚═╝      ╚═════╝\n\n  Code topology maps  •  v{}\n\nUSAGE\n  topo map [<regex>] [--dir <scan-directory>] [--mode <mode>] [--output <filename>]\n\nCOMMANDS\n  map       Search Git-tracked code and write JSON + Mermaid maps\n  view      Browse a JSON map in a local web viewer\n\nWORKSPACE\n  topo map                 Use the pattern and directory in topo.toml\n  topo map 'UserService'   Override the configured regex\n\nOPTIONS\n  --mode <mode>            all (default), paths, contents, or sprinkles (`filenames` aliases paths)\n  -h, --help               Show this help\n  -v, --version            Show version\n",
         env!("CARGO_PKG_VERSION")
     )
+}
+
+fn version() -> String {
+    format!("topo {}\n", env!("CARGO_PKG_VERSION"))
 }
 
 fn view_help() -> String {
@@ -1087,6 +1098,12 @@ mod tests {
         assert!(help.starts_with("████████╗"));
         assert!(help.contains("Code topology maps"));
         assert!(help.contains("topo map [<regex>]"));
+        assert!(help.contains("-v, --version"));
+    }
+
+    #[test]
+    fn version_uses_the_package_version() {
+        assert_eq!(version(), format!("topo {}\n", env!("CARGO_PKG_VERSION")));
     }
 
     #[test]
