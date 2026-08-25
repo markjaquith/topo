@@ -33,6 +33,9 @@ const VIEWER_HTML: &str = r##"<!doctype html>
       --target: #fbbf24;
       --target-bg: #443613;
       --sprinkle: #94a3b8;
+      --added: #86efac;
+      --deleted: #fca5a5;
+      --renamed: #c4b5fd;
     }
     * { box-sizing: border-box; }
     body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
@@ -105,8 +108,22 @@ const VIEWER_HTML: &str = r##"<!doctype html>
     .code-gap::before { padding: 5px 10px; color: var(--muted); border-right: 1px solid var(--line); content: '…'; text-align: right; }
     .code-gap span { padding: 5px 12px; }
     .source-unavailable { margin-top: 22px; color: var(--muted); }
+    .warning { margin: 10px 0; padding: 9px 11px; color: #fde68a; border-left: 3px solid var(--target); background: rgba(251,191,36,.09); }
+    .side-paths { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 14px 0; }
+    .side-path { min-width: 0; padding: 9px 11px; overflow-wrap: anywhere; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); }
+    .side-path b { display: block; margin-bottom: 3px; color: var(--muted); font-size: 11px; text-transform: uppercase; }
+    .diff { margin-top: 18px; overflow: hidden; border: 1px solid var(--line); border-radius: 7px; background: #0d131d; }
+    .diff-line { display: grid; grid-template-columns: 48px 48px minmax(0, 1fr) minmax(0, 1fr); border-left: 3px solid transparent; }
+    .diff-line + .diff-line { border-top: 1px solid rgba(48,59,79,.45); }
+    .diff-line > span { padding: 5px 8px; color: #65758d; border-right: 1px solid var(--line); text-align: right; user-select: none; }
+    .diff-line code { min-width: 0; padding: 5px 10px; overflow-x: auto; border-right: 1px solid var(--line); white-space: pre; }
+    .diff-line.addition { border-left-color: var(--added); background: rgba(134,239,172,.08); }
+    .diff-line.deletion { border-left-color: var(--deleted); background: rgba(252,165,165,.08); }
+    .diff-line.modification { border-left-color: var(--target); background: rgba(251,191,36,.08); }
+    .diff-line.rename-equivalent { border-left-color: var(--renamed); background: rgba(196,181,253,.10); }
+    .rename-toggle { margin-top: 14px; padding: 6px 9px; color: var(--renamed); border: 1px solid #6d5a9b; border-radius: 5px; background: rgba(196,181,253,.08); cursor: pointer; }
     @media (max-width: 1100px) { .topbar { flex-direction: column; } .stats { width: 100%; justify-content: flex-start; } main { height: calc(100vh - 170px); } }
-    @media (max-width: 800px) { main { grid-template-columns: 1fr; height: auto; } aside { max-height: 52vh; border-bottom: 1px solid var(--line); } .resize-handle { display: none; } section.detail { min-height: 48vh; } }
+    @media (max-width: 800px) { main { grid-template-columns: 1fr; height: auto; } aside { max-height: 52vh; border-bottom: 1px solid var(--line); } .resize-handle { display: none; } section.detail { min-height: 48vh; } .side-paths { grid-template-columns: 1fr; } .diff-line { grid-template-columns: 38px 38px minmax(0, 1fr); } .diff-line code + code { grid-column: 3; border-top: 1px dashed var(--line); } }
   </style>
 </head>
 <body>
@@ -144,7 +161,7 @@ const VIEWER_HTML: &str = r##"<!doctype html>
     <section class="detail" id="detail"></section>
   </main>
   <script>
-    const state = { report: null, query: '', filterSpec: { text: '', hitRestrictions: [] }, filter: 'all', selected: null, expanded: new Set(), expandedSourceRanges: new Set(), sidebarCollapsed: false, treeInitialized: false };
+    const state = { report: null, query: '', filterSpec: { text: '', hitRestrictions: [] }, filter: 'all', selected: null, expanded: new Set(), expandedSourceRanges: new Set(), expandedRenamePaths: new Set(), sidebarCollapsed: false, treeInitialized: false };
     const HOME_DIRECTORY = __TOPO_HOME__;
     const byFile = new Map();
     const escapeHtml = value => String(value).replace(/[&<>'"]/g, character => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[character]));
@@ -470,6 +487,12 @@ const VIEWER_HTML: &str = r##"<!doctype html>
       const { text, hitRestrictions } = state.filterSpec;
       if (text && !file.path.toLowerCase().includes(text)) return false;
       if (!hitRestrictions.every(restriction => matchesHitRestriction(file.match_count, restriction))) return false;
+      if (state.report.report_type === 'topo_correlation') {
+        if (state.filter === 'paths') return file.classification === 'paired';
+        if (state.filter === 'content') return ['old_only', 'new_only'].includes(file.classification);
+        if (state.filter === 'sprinkles') return file.classification === 'ambiguous';
+        return true;
+      }
       if (state.filter === 'paths') return file.is_target;
       if (state.filter === 'content') return file.match_count > 0;
       if (state.filter === 'sprinkles') return !file.is_target && file.match_count > 0;
@@ -534,8 +557,8 @@ const VIEWER_HTML: &str = r##"<!doctype html>
       const children = directories.map(child => renderTreeNode(child)).join('') + directFiles.map(file => {
         const selected = state.selected === file.path ? ' selected' : '';
         const target = file.is_target ? ' target' : '';
-        const count = file.match_count ? number(file.match_count) : 'target';
-        const zero = file.match_count ? '' : ' zero';
+        const count = state.report.report_type === 'topo_correlation' ? file.classification.replace('_', ' ') : (file.match_count ? number(file.match_count) : 'target');
+        const zero = file.match_count || state.report.report_type === 'topo_correlation' ? '' : ' zero';
         return `<button class="file${target}${selected}" data-path="${escapeHtml(file.path)}"><span>${renderFilename(file)}</span><span class="count${zero}">${count}</span></button>`;
       }).join('');
       if (!node.name) return `<div class="tree-root">${children}</div>`;
@@ -691,12 +714,68 @@ const VIEWER_HTML: &str = r##"<!doctype html>
       });
     }
 
+    function sidePaths(entry) {
+      const oldPaths = (Array.isArray(entry.old) ? entry.old : [entry.old]).filter(Boolean).map(side => side.path).join(', ') || 'none';
+      const newPaths = (Array.isArray(entry.new) ? entry.new : [entry.new]).filter(Boolean).map(side => side.path).join(', ') || 'none';
+      return `<div class="side-paths"><div class="side-path"><b>Old path</b>${escapeHtml(oldPaths)}</div><div class="side-path"><b>New path</b>${escapeHtml(newPaths)}</div></div>`;
+    }
+
+    function renderWarnings(warnings = []) {
+      return warnings.map(warning => `<div class="warning">${escapeHtml(warning)}</div>`).join('');
+    }
+
+    function renderDiffLine(line) {
+      const className = line.kind.replace('_', '-');
+      const oldText = line.old_text == null ? '' : escapeHtml(line.old_text);
+      const newText = line.new_text == null ? '' : escapeHtml(line.new_text);
+      return `<div class="diff-line ${className}"><span>${line.old_line || ''}</span><span>${line.new_line || ''}</span><code>${oldText || ' '}</code><code>${newText || ' '}</code></div>`;
+    }
+
+    function renderCorrelationDetail(entry) {
+      const badges = `<div class="badges"><span class="badge target">${escapeHtml(entry.classification.replace('_', ' '))}</span><span class="badge">${escapeHtml(entry.entry_type.replace('_', ' '))}</span></div>`;
+      const warnings = [...(state.report.compatibility.warnings || []), ...(entry.warnings || [])];
+      if (entry.entry_type === 'shared_context') {
+        const comparison = entry.region_comparison;
+        if (!comparison.available) {
+          return `<h2>${escapeHtml(entry.path)}</h2>${badges}${sidePaths(entry)}${renderWarnings(warnings)}<p class="source-unavailable">Shared-context comparison is unavailable because source evidence is missing.</p>`;
+        }
+        const expanded = state.expandedRenamePaths.has(entry.path);
+        const renamed = comparison.regions.filter(region => region.classification === 'rename_equivalent');
+        const lines = comparison.regions.filter(region => region.classification !== 'unchanged' && (expanded || region.classification !== 'rename_equivalent')).map(region => renderDiffLine({
+          kind: region.classification === 'rename_equivalent' ? 'rename_equivalent' : (region.old_line && region.new_line ? 'modification' : region.old_line ? 'deletion' : 'addition'),
+          old_line: region.old_line, new_line: region.new_line, old_text: region.old_text, new_text: region.new_text,
+        })).join('');
+        const toggle = renamed.length ? `<button class="rename-toggle" type="button" data-rename-toggle>${expanded ? 'Hide' : 'Show'} ${number(renamed.length)} rename-equivalent ${renamed.length === 1 ? 'region' : 'regions'}</button>` : '';
+        return `<h2>${escapeHtml(entry.path)}</h2>${badges}${sidePaths(entry)}${renderWarnings(warnings)}<p class="path">Matched-region coverage: ${number(comparison.paired_regions)} paired, ${number(comparison.old_only_regions)} old-only, ${number(comparison.new_only_regions)} new-only. Surrounding file text is intentionally not diffed.</p>${toggle}${lines ? `<div class="diff">${lines}</div>` : '<p class="source-unavailable">No substantive matched-region differences.</p>'}`;
+      }
+      if (!entry.smart_diff) {
+        return `<h2>${escapeHtml(entry.path)}</h2>${badges}${sidePaths(entry)}${renderWarnings(warnings)}<p class="source-unavailable">No diff is computed for unmatched or ambiguous entries. Original evidence is embedded in the report.</p>`;
+      }
+      const expanded = state.expandedRenamePaths.has(entry.path);
+      const substantive = entry.smart_diff.lines.filter(line => !['unchanged', 'rename_equivalent'].includes(line.kind));
+      const renamed = entry.smart_diff.lines.filter(line => line.kind === 'rename_equivalent');
+      const visible = expanded ? entry.smart_diff.lines.filter(line => line.kind !== 'unchanged') : substantive;
+      const toggle = renamed.length ? `<button class="rename-toggle" type="button" data-rename-toggle>${expanded ? 'Hide' : 'Show'} ${number(renamed.length)} rename-equivalent ${renamed.length === 1 ? 'line' : 'lines'}</button>` : '';
+      const diff = visible.length ? `<div class="diff">${visible.map(renderDiffLine).join('')}</div>` : '<p class="source-unavailable">No substantive differences. Unchanged and rename-equivalent lines are hidden by default.</p>';
+      return `<h2>${escapeHtml(entry.path)}</h2>${badges}${sidePaths(entry)}${renderWarnings(warnings)}<p class="path">Smart diff: ${escapeHtml(entry.smart_diff.classification.replace('_', ' '))}. Original text and line numbers are preserved.</p>${toggle}${diff}`;
+    }
+
     function renderDetail() {
       applySidebarState();
       const detail = document.querySelector('#detail');
       const file = state.report.files.find(candidate => candidate.path === state.selected);
       if (!file) {
         detail.innerHTML = '<div class="empty"><h2>Select a file</h2></div>';
+        return;
+      }
+      if (state.report.report_type === 'topo_correlation') {
+        const entry = state.report.entries.find(candidate => candidate.path === state.selected);
+        detail.innerHTML = renderCorrelationDetail(entry);
+        detail.querySelector('[data-rename-toggle]')?.addEventListener('click', () => {
+          if (state.expandedRenamePaths.has(entry.path)) state.expandedRenamePaths.delete(entry.path);
+          else state.expandedRenamePaths.add(entry.path);
+          renderDetail();
+        });
         return;
       }
       const matches = byFile.get(file.path) || [];
@@ -713,6 +792,21 @@ const VIEWER_HTML: &str = r##"<!doctype html>
     }
 
     function renderHeader() {
+      if (state.report.report_type === 'topo_correlation') {
+        const oldMetadata = state.report.old_report.metadata;
+        const newMetadata = state.report.new_report.metadata;
+        const entries = state.report.entries;
+        document.querySelector('#context').innerHTML = `
+          <span class="context-item"><strong>${escapeHtml(oldMetadata.regex)}</strong> → <strong>${escapeHtml(newMetadata.regex)}</strong></span>
+          <span class="context-item">${escapeHtml(displayPath(oldMetadata.scan_directory))}</span>
+          <span class="context-item">Scanned ${escapeHtml(new Date(oldMetadata.searched_at_unix_seconds * 1000).toLocaleString())} → ${escapeHtml(new Date(newMetadata.searched_at_unix_seconds * 1000).toLocaleString())}</span>`;
+        document.querySelector('#stats').innerHTML = `
+          <div class="stat"><b>${number(entries.length)}</b><span>entries</span></div>
+          <div class="stat"><b>${number(entries.filter(entry => entry.classification === 'paired').length)}</b><span>paired</span></div>
+          <div class="stat"><b>${number(entries.filter(entry => ['old_only', 'new_only'].includes(entry.classification)).length)}</b><span>unmatched</span></div>
+          <div class="stat"><b>${number(entries.filter(entry => entry.classification === 'ambiguous').length)}</b><span>ambiguous</span></div>`;
+        return;
+      }
       const metadata = state.report.metadata;
       document.querySelector('#context').innerHTML = `
         <span class="context-item" aria-label="Scan directory"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 4H2c-1.11 0-1.99.89-1.99 2L0 18c0 1.11.89 2 2 2h20c1.11 0 2-.89 2-2V8c0-1.11-.89-2-2-2H12l-2-2z"/></svg><span>${escapeHtml(displayPath(metadata.scan_directory))}</span></span>
@@ -753,8 +847,20 @@ const VIEWER_HTML: &str = r##"<!doctype html>
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
           return response.json();
         });
+        if (state.report.report_type === 'topo_correlation') {
+          state.report.metadata = state.report.old_report.metadata;
+          state.report.files = state.report.entries.map(entry => ({
+            path: entry.path,
+            classification: entry.classification,
+            match_count: [...(Array.isArray(entry.old) ? entry.old : [entry.old]), ...(Array.isArray(entry.new) ? entry.new : [entry.new])].filter(Boolean).reduce((sum, side) => sum + side.matches.length, 0),
+            is_target: entry.classification === 'paired',
+            path_match_ranges: [],
+          }));
+          const labels = { paths: 'Paired', content: 'Unmatched', sprinkles: 'Ambiguous' };
+          document.querySelectorAll('.filter[data-filter]').forEach(button => { if (labels[button.dataset.filter]) button.textContent = labels[button.dataset.filter]; });
+        }
         startTerrain(state.report.metadata);
-        for (const match of state.report.matches) {
+        for (const match of state.report.matches || []) {
           if (!byFile.has(match.file)) byFile.set(match.file, []);
           byFile.get(match.file).push(match);
         }
@@ -799,6 +905,7 @@ pub fn run(report_path: PathBuf, open_browser: bool) -> Result<(), String> {
         .map_err(|error| format!("could not read {}: {error}", report_path.display()))?;
     let mut report: Value = serde_json::from_slice(&report)
         .map_err(|error| format!("{} is not valid JSON: {error}", report_path.display()))?;
+    validate_report(&report)?;
     add_highlighted_lines(&mut report);
     let report = serde_json::to_vec(&report)
         .map_err(|error| format!("could not prepare viewer data: {error}"))?;
@@ -827,6 +934,25 @@ pub fn run(report_path: PathBuf, open_browser: bool) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn validate_report(report: &Value) -> Result<(), String> {
+    let report_type = report
+        .get("report_type")
+        .and_then(Value::as_str)
+        .unwrap_or("topo_map");
+    let version = report
+        .get("format_version")
+        .and_then(Value::as_u64)
+        .ok_or("report is missing a numeric format_version")?;
+    match report_type {
+        "topo_map" if version <= crate::FORMAT_VERSION as u64 => Ok(()),
+        "topo_correlation" if version <= 1 => Ok(()),
+        "topo_map" | "topo_correlation" => Err(format!(
+            "unsupported {report_type} format version {version}"
+        )),
+        _ => Err(format!("unsupported report type `{report_type}`")),
+    }
 }
 
 fn add_highlighted_lines(report: &mut Value) {
@@ -1018,5 +1144,23 @@ mod tests {
         let lines = report["files"][0]["highlighted_lines"].as_array().unwrap();
         assert_eq!(lines.len(), 4);
         assert!(lines[0].as_str().unwrap().contains("class"));
+    }
+
+    #[test]
+    fn viewer_dispatches_legacy_maps_and_correlation_reports() {
+        assert!(validate_report(&serde_json::json!({ "format_version": 7 })).is_ok());
+        assert!(
+            validate_report(
+                &serde_json::json!({ "report_type": "topo_correlation", "format_version": 1 })
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_report(&serde_json::json!({ "report_type": "unknown", "format_version": 1 }))
+                .is_err()
+        );
+        assert!(VIEWER_HTML.contains("renderCorrelationDetail"));
+        assert!(VIEWER_HTML.contains("expandedRenamePaths"));
+        assert!(VIEWER_HTML.contains("shared_context"));
     }
 }
