@@ -13,6 +13,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+mod correlation;
 mod viewer;
 
 const FORMAT_VERSION: u8 = 7;
@@ -32,7 +33,14 @@ struct ViewOptions {
     open_browser: bool,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+#[derive(Debug)]
+struct CorrelateOptions {
+    old_report: PathBuf,
+    new_report: PathBuf,
+    output: PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum MapMode {
     #[default]
@@ -72,8 +80,10 @@ struct WorkspaceConfig {
     pattern: String,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct Report {
+    #[serde(default = "map_report_type")]
+    report_type: String,
     format_version: u8,
     metadata: Metadata,
     matches: Vec<Match>,
@@ -81,7 +91,7 @@ struct Report {
     graph: Graph,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct Metadata {
     workspace_directory: String,
     repository_root: String,
@@ -89,12 +99,16 @@ struct Metadata {
     regex: String,
     mode: MapMode,
     searched_at_unix_seconds: u64,
-    matcher: &'static str,
-    file_selection: &'static str,
+    matcher: String,
+    file_selection: String,
     tracked_file_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    git_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    git_dirty: Option<bool>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct Match {
     file: String,
     line: u64,
@@ -103,7 +117,7 @@ struct Match {
     text: String,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct FileResult {
     path: String,
     match_count: usize,
@@ -112,22 +126,22 @@ struct FileResult {
     content: Option<String>,
 }
 
-#[derive(Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 struct PathMatch {
     component_index: usize,
     start: usize,
     end: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct Graph {
     nodes: Vec<Node>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct Node {
     id: String,
-    kind: &'static str,
+    kind: String,
     label: String,
     match_count: Option<usize>,
     is_target: bool,
@@ -154,8 +168,21 @@ fn main() {
         print!("{}", view_help());
         return;
     }
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "correlate")
+        && matches!(arguments.get(1).map(String::as_str), Some("--help" | "-h"))
+    {
+        print!("{}", correlate_help());
+        return;
+    }
     let result = if arguments.first().is_some_and(|argument| argument == "view") {
         run_view(arguments)
+    } else if arguments
+        .first()
+        .is_some_and(|argument| argument == "correlate")
+    {
+        run_correlate(arguments)
     } else {
         run(arguments)
     };
@@ -235,6 +262,7 @@ fn run(arguments: Vec<String>) -> Result<(), String> {
         .map_err(|error| error.to_string())?
         .as_secs();
     let report = Report {
+        report_type: map_report_type(),
         format_version: FORMAT_VERSION,
         metadata: Metadata {
             workspace_directory: workspace_directory.display().to_string(),
@@ -243,9 +271,11 @@ fn run(arguments: Vec<String>) -> Result<(), String> {
             regex: pattern.clone(),
             mode,
             searched_at_unix_seconds,
-            matcher: "ripgrep",
-            file_selection: "git ls-files --cached, filtered through Git ignore rules, workspace .topoignore, and available working-tree files",
+            matcher: "ripgrep".to_owned(),
+            file_selection: "git ls-files --cached, filtered through Git ignore rules, workspace .topoignore, and available working-tree files".to_owned(),
             tracked_file_count: tracked_files.len(),
+            git_revision: git_revision(&repository_root),
+            git_dirty: git_dirty(&repository_root),
         },
         matches,
         files,
@@ -287,6 +317,44 @@ fn run(arguments: Vec<String>) -> Result<(), String> {
 fn run_view(arguments: Vec<String>) -> Result<(), String> {
     let options = parse_view_args(arguments)?;
     viewer::run(options.report, options.open_browser)
+}
+
+fn run_correlate(arguments: Vec<String>) -> Result<(), String> {
+    let options = parse_correlate_args(arguments)?;
+    correlation::run(&options.old_report, &options.new_report, &options.output)?;
+    println!("Correlation  {}", options.output.display());
+    Ok(())
+}
+
+fn parse_correlate_args(args: Vec<String>) -> Result<CorrelateOptions, String> {
+    let mut args = args.into_iter();
+    if args.next().as_deref() != Some("correlate") {
+        return Err(correlate_usage());
+    }
+    let old_report = PathBuf::from(args.next().ok_or_else(correlate_usage)?);
+    let new_report = PathBuf::from(args.next().ok_or_else(correlate_usage)?);
+    let mut output = None;
+    while let Some(argument) = args.next() {
+        match argument.as_str() {
+            "--output" | "-o" => {
+                output = Some(PathBuf::from(
+                    args.next()
+                        .ok_or_else(|| "--output needs a filename".to_owned())?,
+                ));
+            }
+            _ => {
+                return Err(format!(
+                    "unexpected argument `{argument}`\n\n{}",
+                    correlate_usage()
+                ));
+            }
+        }
+    }
+    Ok(CorrelateOptions {
+        old_report,
+        new_report,
+        output: output.ok_or_else(|| "--output is required for correlation reports".to_owned())?,
+    })
 }
 
 fn parse_view_args(args: Vec<String>) -> Result<ViewOptions, String> {
@@ -365,7 +433,7 @@ fn parse_args(args: Vec<String>) -> Result<Options, String> {
 
 fn main_help() -> String {
     format!(
-        "████████╗ ██████╗ ██████╗  ██████╗\n╚══██╔══╝██╔═══██╗██╔══██╗██╔═══██╗\n   ██║   ██║   ██║██████╔╝██║   ██║\n   ██║   ██║   ██║██╔═══╝ ██║   ██║\n   ██║   ╚██████╔╝██║     ╚██████╔╝\n   ╚═╝    ╚═════╝ ╚═╝      ╚═════╝\n\n  Code topology maps  •  v{}\n\nUSAGE\n  topo map [<regex>] [--dir <scan-directory>] [--mode <mode>] [--output <filename>]\n\nCOMMANDS\n  map       Search Git-tracked code and write JSON + Mermaid maps\n  view      Browse a JSON map in a local web viewer\n\nWORKSPACE\n  topo map                 Use the pattern and directory in topo.toml\n  topo map 'UserService'   Override the configured regex\n\nOPTIONS\n  --mode <mode>            all (default), paths, contents, or sprinkles (`filenames` aliases paths)\n  -h, --help               Show this help\n  -v, --version            Show version\n",
+        "████████╗ ██████╗ ██████╗  ██████╗\n╚══██╔══╝██╔═══██╗██╔══██╗██╔═══██╗\n   ██║   ██║   ██║██████╔╝██║   ██║\n   ██║   ██║   ██║██╔═══╝ ██║   ██║\n   ██║   ╚██████╔╝██║     ╚██████╔╝\n   ╚═╝    ╚═════╝ ╚═╝      ╚═════╝\n\n  Code topology maps  •  v{}\n\nUSAGE\n  topo map [<regex>] [--dir <scan-directory>] [--mode <mode>] [--output <filename>]\n\nCOMMANDS\n  map       Search Git-tracked code and write JSON + Mermaid maps\n  correlate Compare two maps using their recorded match evidence\n  view      Browse a JSON map or correlation report\n\nWORKSPACE\n  topo map                 Use the pattern and directory in topo.toml\n  topo map 'UserService'   Override the configured regex\n\nOPTIONS\n  --mode <mode>            all (default), paths, contents, or sprinkles (`filenames` aliases paths)\n  -h, --help               Show this help\n  -v, --version            Show version\n",
         env!("CARGO_PKG_VERSION")
     )
 }
@@ -380,6 +448,19 @@ fn view_help() -> String {
 
 fn view_usage() -> String {
     "Usage: topo view <report.topo.json> [--no-open]".to_owned()
+}
+
+fn correlate_help() -> String {
+    "Usage: topo correlate <old.topo.json> <new.topo.json> --output <report.topo-correlation.json>\n\nCompare compatible map reports using exact normalized paths and recorded content-match ranges.\n".to_owned()
+}
+
+fn correlate_usage() -> String {
+    "Usage: topo correlate <old.topo.json> <new.topo.json> --output <report.topo-correlation.json>"
+        .to_owned()
+}
+
+fn map_report_type() -> String {
+    "topo_map".to_owned()
 }
 
 fn usage() -> String {
@@ -450,6 +531,27 @@ fn git_root(search_directory: &Path) -> Result<PathBuf, String> {
     let root = String::from_utf8(output.stdout)
         .map_err(|_| "git returned a non-UTF-8 repository path".to_owned())?;
     Ok(PathBuf::from(root.trim_end()))
+}
+
+fn git_revision(repository_root: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(repository_root)
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+fn git_dirty(repository_root: &Path) -> Option<bool> {
+    let output = Command::new("git")
+        .args(["status", "--porcelain", "--untracked-files=no"])
+        .current_dir(repository_root)
+        .output()
+        .ok()?;
+    output.status.success().then_some(!output.stdout.is_empty())
 }
 
 fn tracked_files(repository_root: &Path, scope: &Path) -> Result<Vec<PathBuf>, String> {
@@ -818,7 +920,7 @@ fn build_graph(files: &[FileResult]) -> Graph {
     for (index, file) in files.iter().enumerate() {
         nodes.push(Node {
             id: file_node_id(&file.path),
-            kind: "file",
+            kind: "file".to_owned(),
             label: file.path.clone(),
             match_count: Some(file.match_count),
             is_target: file.is_target,
@@ -1107,6 +1209,57 @@ mod tests {
     }
 
     #[test]
+    fn correlate_requires_two_inputs_and_explicit_output() {
+        let options = parse_correlate_args(vec![
+            "correlate".to_owned(),
+            "old.topo.json".to_owned(),
+            "new.topo.json".to_owned(),
+            "--output".to_owned(),
+            "result.topo-correlation.json".to_owned(),
+        ])
+        .unwrap();
+        assert_eq!(options.old_report, PathBuf::from("old.topo.json"));
+        assert_eq!(options.new_report, PathBuf::from("new.topo.json"));
+        assert_eq!(
+            options.output,
+            PathBuf::from("result.topo-correlation.json")
+        );
+        assert!(
+            parse_correlate_args(vec![
+                "correlate".to_owned(),
+                "old".to_owned(),
+                "new".to_owned()
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn map_report_deserialization_accepts_pre_discriminator_schema() {
+        let report: Report = serde_json::from_value(serde_json::json!({
+            "format_version": 7,
+            "metadata": {
+                "workspace_directory": "/tmp/workspace",
+                "repository_root": "/tmp/repository",
+                "scan_directory": "/tmp/repository",
+                "regex": "OldFeature",
+                "mode": "all",
+                "searched_at_unix_seconds": 42,
+                "matcher": "ripgrep",
+                "file_selection": "git ls-files",
+                "tracked_file_count": 1
+            },
+            "matches": [],
+            "files": [],
+            "graph": { "nodes": [] }
+        }))
+        .unwrap();
+        assert_eq!(report.report_type, "topo_map");
+        assert_eq!(report.metadata.git_revision, None);
+        assert_eq!(report.metadata.git_dirty, None);
+    }
+
+    #[test]
     fn workspace_config_is_strictly_validated() {
         let directory = env::temp_dir().join(format!("topo-config-test-{}", std::process::id()));
         fs::create_dir_all(&directory).unwrap();
@@ -1274,35 +1427,35 @@ mod tests {
             nodes: vec![
                 Node {
                     id: "file:packs/payments/app/client.rb".to_owned(),
-                    kind: "file",
+                    kind: "file".to_owned(),
                     label: "packs/payments/app/client.rb".to_owned(),
                     match_count: Some(1),
                     is_target: true,
                 },
                 Node {
                     id: "file:packs/payments/lib/helper.rb".to_owned(),
-                    kind: "file",
+                    kind: "file".to_owned(),
                     label: "packs/payments/lib/helper.rb".to_owned(),
                     match_count: Some(1),
                     is_target: false,
                 },
                 Node {
                     id: "file:packs/payments/root.rb".to_owned(),
-                    kind: "file",
+                    kind: "file".to_owned(),
                     label: "packs/payments/root.rb".to_owned(),
                     match_count: Some(1),
                     is_target: false,
                 },
                 Node {
                     id: "file:packs/payments/extra/deep/worker.rb".to_owned(),
-                    kind: "file",
+                    kind: "file".to_owned(),
                     label: "packs/payments/extra/deep/worker.rb".to_owned(),
                     match_count: Some(1),
                     is_target: false,
                 },
                 Node {
                     id: "file:src/main.rs".to_owned(),
-                    kind: "file",
+                    kind: "file".to_owned(),
                     label: "src/main.rs".to_owned(),
                     match_count: Some(1),
                     is_target: false,

@@ -70,7 +70,9 @@ The report JSON contains the workspace directory, scan directory, repository
 root, regex, timestamp, every occurrence, matching files, and directory graph
 nodes. Each matching file has an `is_target` flag when its basename matches the
 regex and includes its complete UTF-8 source text (non-text files omit source
-text).
+text). New reports also include `report_type: "topo_map"`, the current Git
+revision, and whether tracked files were dirty. Older map reports remain valid;
+they embed source evidence but cannot prove which Git revision it came from.
 Without `--output`, the report is named
 `<scan-dir-basename>.<unix-timestamp>.topo.json` in the workspace.
 
@@ -88,3 +90,34 @@ filters, summary counts, and syntax-highlighted source. It initially shows
 matching lines with one line of context; click a collapsed line range to reveal
 it. Ruby is highlighted out of the box, with plaintext fallback for unknown
 file types. Use `--no-open` to print the URL without launching a browser.
+
+## Correlating implementations
+
+Compare maps made with old and new implementation vocabulary:
+
+```sh
+topo correlate old.topo.json new.topo.json --output feature.topo-correlation.json
+topo view feature.topo-correlation.json
+```
+
+Both inputs must record the same repository root and scan scope. Correlation is
+most reliable when both scans were taken from the same Git revision and clean
+working tree; the report surfaces missing or conflicting provenance rather than
+assuming equivalence.
+
+The correlation report is a distinct `topo_correlation` format. It embeds both
+input reports and preserves real paths, source, regexes, occurrences, path
+normalization spans, and content normalization spans. Recorded path-match spans
+are replaced with `{CORRELATION}` to form an exact logical display key. That key
+is never opened as a repository path. Duplicate keys are `ambiguous`, not
+guessed; unmatched keys are `old_only` or `new_only`.
+
+For paired files, Topo normalizes only recorded content-match byte ranges before
+aligning lines. The viewer hides unchanged and rename-equivalent lines by
+default and lets you reveal rename-equivalent lines separately. It always uses
+the original text and line numbers for display. If a regex covers most source,
+the report warns that normalization may suppress meaningful differences.
+
+When both scans contain the same physical file, Topo emits a distinct
+`shared_context` entry. It compares matched regions and reports counterpart
+coverage without diffing the whole file against itself.
