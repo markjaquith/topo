@@ -86,11 +86,11 @@ const VIEWER_HTML: &str = r##"<!doctype html>
     .directory-count { flex: 0 0 auto; margin-left: 10px; color: var(--muted); font-size: 11px; }
     .children { margin-left: 14px; border-left: 1px solid #283244; padding-left: 8px; }
     .file { display: flex; width: 100%; min-height: 36px; gap: 8px; align-items: center; padding: 5px 7px; color: var(--text); border: 1px solid transparent; border-radius: 5px; background: transparent; text-align: left; cursor: pointer; }
-    .file:hover, .file.selected { padding-top: 4px; padding-bottom: 4px; background: var(--panel-raised); border-color: var(--line); }
+    .file:hover, .file.selected { background: var(--panel-raised); border-color: var(--line); }
     .file-label { min-width: 0; }
     .correlation-paths { display: block; max-width: 100%; margin-top: 2px; overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
     .path-match { padding: 0; color: #fde68a; background: transparent; font-weight: 700; }
-    .file .count { display: inline-flex; min-width: 24px; height: 24px; align-items: center; justify-content: center; margin-left: auto; padding: 0 7px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; background: var(--bg); font-size: 12px; }
+    .file .count { display: inline-flex; min-width: 24px; height: 24px; flex: 0 0 auto; align-items: center; justify-content: center; margin-left: auto; padding: 0 7px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; background: var(--bg); font-size: 12px; white-space: nowrap; }
     .file .count.zero { color: #fde68a; border-color: #a16207; background: var(--target-bg); }
     section.detail { overflow: auto; padding: 28px; }
     .empty { max-width: 520px; margin: 18vh auto; color: var(--muted); text-align: center; }
@@ -1210,6 +1210,8 @@ mod tests {
         assert!(VIEWER_HTML.contains("id=\"tree-control\""));
         assert!(VIEWER_HTML.contains("id=\"resize-handle\""));
         assert!(VIEWER_HTML.contains("id=\"sidebar-toggle\""));
+        assert!(!VIEWER_HTML.contains(".file:hover, .file.selected { padding-top"));
+        assert!(VIEWER_HTML.contains("flex: 0 0 auto; align-items: center"));
         assert!(VIEWER_HTML.contains("localStorage.setItem(SIDEBAR_WIDTH_KEY"));
         assert!(VIEWER_HTML.contains("SIDEBAR_COLLAPSED_KEY"));
         assert!(VIEWER_HTML.contains("event.key !== '/'"));
