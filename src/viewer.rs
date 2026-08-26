@@ -527,6 +527,11 @@ const VIEWER_HTML: &str = r##"<!doctype html>
       return file.filename || file.path.split('/').pop();
     }
 
+    function classificationLabel(classification) {
+      const separator = ['old_only', 'new_only'].includes(classification) ? '\u00a0' : ' ';
+      return classification.replace('_', separator);
+    }
+
     function renderPathComponent(component, ranges) {
       if (!ranges.length) return escapeHtml(component);
       const characters = Array.from(component);
@@ -557,7 +562,7 @@ const VIEWER_HTML: &str = r##"<!doctype html>
       const children = directories.map(child => renderTreeNode(child)).join('') + directFiles.map(file => {
         const selected = state.selected === file.path ? ' selected' : '';
         const target = file.is_target ? ' target' : '';
-        const count = state.report.report_type === 'topo_correlation' ? file.classification.replace('_', ' ') : (file.match_count ? number(file.match_count) : 'target');
+        const count = state.report.report_type === 'topo_correlation' ? classificationLabel(file.classification) : (file.match_count ? number(file.match_count) : 'target');
         const zero = file.match_count || state.report.report_type === 'topo_correlation' ? '' : ' zero';
         return `<button class="file${target}${selected}" data-path="${escapeHtml(file.path)}"><span>${renderFilename(file)}</span><span class="count${zero}">${count}</span></button>`;
       }).join('');
@@ -732,7 +737,7 @@ const VIEWER_HTML: &str = r##"<!doctype html>
     }
 
     function renderCorrelationDetail(entry) {
-      const badges = `<div class="badges"><span class="badge target">${escapeHtml(entry.classification.replace('_', ' '))}</span><span class="badge">${escapeHtml(entry.entry_type.replace('_', ' '))}</span></div>`;
+      const badges = `<div class="badges"><span class="badge target">${escapeHtml(classificationLabel(entry.classification))}</span><span class="badge">${escapeHtml(entry.entry_type.replace('_', ' '))}</span></div>`;
       const warnings = [...(state.report.compatibility.warnings || []), ...(entry.warnings || [])];
       if (entry.entry_type === 'shared_context') {
         const comparison = entry.region_comparison;
@@ -1160,6 +1165,12 @@ mod tests {
                 .is_err()
         );
         assert!(VIEWER_HTML.contains("renderCorrelationDetail"));
+        assert!(
+            VIEWER_HTML
+                .contains(r"['old_only', 'new_only'].includes(classification) ? '\u00a0' : ' '")
+        );
+        assert!(VIEWER_HTML.contains("classificationLabel(file.classification)"));
+        assert!(VIEWER_HTML.contains("classificationLabel(entry.classification)"));
         assert!(VIEWER_HTML.contains("expandedRenamePaths"));
         assert!(VIEWER_HTML.contains("shared_context"));
     }
