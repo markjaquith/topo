@@ -1,0 +1,42 @@
+amends "package://github.com/jdx/hk/releases/download/v1.56.1/hk@1.56.1#/Config.pkl"
+
+min_hk_version = "1.56.1"
+
+hooks {
+  ["pre-commit"] {
+    stash = "git"
+    steps {
+      ["secretlint"] {
+        glob = "**/*"
+        check = new Command {
+          argv = List(
+            "npm",
+            "run",
+            "--silent",
+            "lint:secrets",
+            "--",
+            "--no-glob",
+            "{{files}}"
+          )
+        }
+      }
+    }
+  }
+
+  ["pre-push"] {
+    steps {
+      ["secretlint"] {
+        check = new Command {
+          argv = List(
+            "npm",
+            "run",
+            "--silent",
+            "lint:secrets",
+            "--",
+            "**/*"
+          )
+        }
+      }
+    }
+  }
+}

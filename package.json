@@ -1,0 +1,10 @@
+{
+  "private": true,
+  "scripts": {
+    "lint:secrets": "secretlint"
+  },
+  "devDependencies": {
+    "@secretlint/secretlint-rule-pattern": "13.0.4",
+    "secretlint": "13.0.4"
+  }
+}

@@ -11,6 +11,8 @@ use crate::{FileResult, Match, PathMatch, Report};
 
 const VERSION: u8 = 1;
 const SENTINEL: &str = "{CORRELATION}";
+const MIN_FUZZY_PATH_SIMILARITY: f64 = 0.8;
+const MIN_FUZZY_SOURCE_SIMILARITY: f64 = 0.55;
 
 #[derive(Debug, Serialize)]
 struct CorrelationReport {
@@ -49,14 +51,6 @@ enum Entry {
         old: Vec<Side>,
         new: Vec<Side>,
         smart_diff: Option<SmartDiff>,
-        warnings: Vec<String>,
-    },
-    SharedContext {
-        path: String,
-        classification: Classification,
-        old: Box<Side>,
-        new: Box<Side>,
-        region_comparison: RegionComparison,
         warnings: Vec<String>,
     },
 }
@@ -120,26 +114,6 @@ enum DiffKind {
     Addition,
     Deletion,
     Modification,
-}
-
-#[derive(Debug, Serialize)]
-struct RegionComparison {
-    available: bool,
-    old_regions: usize,
-    new_regions: usize,
-    paired_regions: usize,
-    old_only_regions: usize,
-    new_only_regions: usize,
-    regions: Vec<RegionDiff>,
-}
-
-#[derive(Debug, Serialize)]
-struct RegionDiff {
-    old_line: Option<u64>,
-    new_line: Option<u64>,
-    old_text: Option<String>,
-    new_text: Option<String>,
-    classification: DiffClassification,
 }
 
 pub fn run(old_path: &Path, new_path: &Path, output: &Path) -> Result<(), String> {
@@ -253,22 +227,7 @@ fn correlate(old: &Report, new: &Report) -> Vec<Entry> {
         .filter(|path| new_by_path.contains_key(*path))
         .map(|path| (*path).clone())
         .collect::<BTreeSet<_>>();
-    let mut entries = shared_paths
-        .iter()
-        .map(|path| {
-            let old_side = side(old_by_path[path], old);
-            let new_side = side(new_by_path[path], new);
-            let (region_comparison, warnings) = compare_regions(&old_side, &new_side);
-            Entry::SharedContext {
-                path: path.clone(),
-                classification: Classification::Paired,
-                old: Box::new(old_side),
-                new: Box::new(new_side),
-                region_comparison,
-                warnings,
-            }
-        })
-        .collect::<Vec<_>>();
+    let mut entries = Vec::new();
     let old_groups = groups(&old.files, &shared_paths);
     let new_groups = groups(&new.files, &shared_paths);
     entries.extend(
@@ -311,13 +270,204 @@ fn correlate(old: &Report, new: &Report) -> Vec<Entry> {
                 }
             }),
     );
+    add_fuzzy_pairs(&mut entries, old, new);
     entries.sort_by(|left, right| entry_path(left).cmp(entry_path(right)));
     entries
 }
 
+fn add_fuzzy_pairs(entries: &mut Vec<Entry>, old: &Report, new: &Report) {
+    let mut unavailable_old = BTreeSet::new();
+    let mut unavailable_new = BTreeSet::new();
+    for entry in entries.iter() {
+        match entry {
+            Entry::FilePair {
+                classification: Classification::Paired | Classification::Ambiguous,
+                old,
+                new,
+                ..
+            } => {
+                unavailable_old.extend(old.iter().map(|side| side.path.clone()));
+                unavailable_new.extend(new.iter().map(|side| side.path.clone()));
+            }
+            _ => {}
+        }
+    }
+
+    let old_candidates = old
+        .files
+        .iter()
+        .filter(|file| file.is_target && !unavailable_old.contains(&file.path))
+        .collect::<Vec<_>>();
+    let new_candidates = new
+        .files
+        .iter()
+        .filter(|file| file.is_target && !unavailable_new.contains(&file.path))
+        .collect::<Vec<_>>();
+    let mut scores = Vec::new();
+    for (old_index, old_file) in old_candidates.iter().enumerate() {
+        for (new_index, new_file) in new_candidates.iter().enumerate() {
+            if old_file.path == new_file.path {
+                continue;
+            }
+            if !fuzzy_paths_compatible(old_file, new_file) {
+                continue;
+            }
+            let old_side = side(old_file, old);
+            let new_side = side(new_file, new);
+            let Some(score) = source_similarity(&old_side, &new_side)
+                .filter(|score| *score >= MIN_FUZZY_SOURCE_SIMILARITY)
+            else {
+                continue;
+            };
+            scores.push((old_index, new_index, score));
+        }
+    }
+
+    let mut pairs = scores
+        .iter()
+        .filter(|(old_index, new_index, score)| {
+            unique_best(&scores, *old_index, true) == Some((*new_index, *score))
+                && unique_best(&scores, *new_index, false) == Some((*old_index, *score))
+        })
+        .copied()
+        .collect::<Vec<_>>();
+    pairs.sort_by(|left, right| {
+        old_candidates[left.0]
+            .path
+            .cmp(&old_candidates[right.0].path)
+    });
+
+    let paired_old = pairs
+        .iter()
+        .map(|(old_index, _, _)| old_candidates[*old_index].path.as_str())
+        .collect::<BTreeSet<_>>();
+    let paired_new = pairs
+        .iter()
+        .map(|(_, new_index, _)| new_candidates[*new_index].path.as_str())
+        .collect::<BTreeSet<_>>();
+    entries.retain(|entry| match entry {
+        Entry::FilePair {
+            classification: Classification::OldOnly,
+            old,
+            ..
+        } => !old
+            .iter()
+            .any(|side| paired_old.contains(side.path.as_str())),
+        Entry::FilePair {
+            classification: Classification::NewOnly,
+            new,
+            ..
+        } => !new
+            .iter()
+            .any(|side| paired_new.contains(side.path.as_str())),
+        _ => true,
+    });
+    entries.extend(pairs.into_iter().map(|(old_index, new_index, score)| {
+        let old_file = old_candidates[old_index];
+        let new_file = new_candidates[new_index];
+        let old_side = side(old_file, old);
+        let new_side = side(new_file, new);
+        let (smart_diff, mut warnings) = smart_diff(&old_side, &new_side);
+        warnings.insert(
+            0,
+            format!(
+                "Paired by source similarity ({:.0}%) despite differing normalized paths.",
+                score * 100.0
+            ),
+        );
+        Entry::FilePair {
+            path: normalize_path(&old_file.path, &old_file.path_match_ranges),
+            classification: Classification::Paired,
+            old: vec![old_side],
+            new: vec![new_side],
+            smart_diff: Some(smart_diff),
+            warnings,
+        }
+    }));
+}
+
+fn fuzzy_paths_compatible(old: &FileResult, new: &FileResult) -> bool {
+    if Path::new(&old.path).extension() != Path::new(&new.path).extension() {
+        return false;
+    }
+    let old = normalize_path(&old.path, &old.path_match_ranges).replace(SENTINEL, "");
+    let new = normalize_path(&new.path, &new.path_match_ranges).replace(SENTINEL, "");
+    string_similarity(&old, &new) >= MIN_FUZZY_PATH_SIMILARITY
+}
+
+fn string_similarity(old: &str, new: &str) -> f64 {
+    let old = old.chars().collect::<Vec<_>>();
+    let new = new.chars().collect::<Vec<_>>();
+    let longest = old.len().max(new.len());
+    if longest == 0 {
+        return 1.0;
+    }
+    let mut previous = (0..=new.len()).collect::<Vec<_>>();
+    for (old_index, old_character) in old.iter().enumerate() {
+        let mut current = vec![old_index + 1; new.len() + 1];
+        for (new_index, new_character) in new.iter().enumerate() {
+            current[new_index + 1] = if old_character == new_character {
+                previous[new_index]
+            } else {
+                (previous[new_index] + 1)
+                    .min(previous[new_index + 1] + 1)
+                    .min(current[new_index] + 1)
+            };
+        }
+        previous = current;
+    }
+    1.0 - previous[new.len()] as f64 / longest as f64
+}
+
+fn source_similarity(old: &Side, new: &Side) -> Option<f64> {
+    let old = lines(&normalized(old)?);
+    let new = lines(&normalized(new)?);
+    let total = old.len() + new.len();
+    (total > 0).then(|| 2.0 * lcs_len(&old, &new) as f64 / total as f64)
+}
+
+fn lcs_len(old: &[String], new: &[String]) -> usize {
+    let mut previous = vec![0; new.len() + 1];
+    for old_line in old {
+        let mut current = vec![0; new.len() + 1];
+        for (new_index, new_line) in new.iter().enumerate() {
+            current[new_index + 1] = if old_line == new_line {
+                previous[new_index] + 1
+            } else {
+                previous[new_index + 1].max(current[new_index])
+            };
+        }
+        previous = current;
+    }
+    previous[new.len()]
+}
+
+fn unique_best(
+    scores: &[(usize, usize, f64)],
+    candidate_index: usize,
+    old_to_new: bool,
+) -> Option<(usize, f64)> {
+    let mut candidates = scores
+        .iter()
+        .filter(|(old_index, new_index, _)| {
+            if old_to_new {
+                *old_index == candidate_index
+            } else {
+                *new_index == candidate_index
+            }
+        })
+        .map(|(old_index, new_index, score)| {
+            (if old_to_new { *new_index } else { *old_index }, *score)
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| right.1.total_cmp(&left.1));
+    let best = candidates.first().copied()?;
+    (candidates.get(1).is_none_or(|second| best.1 > second.1)).then_some(best)
+}
+
 fn entry_path(entry: &Entry) -> &str {
     match entry {
-        Entry::FilePair { path, .. } | Entry::SharedContext { path, .. } => path,
+        Entry::FilePair { path, .. } => path,
     }
 }
 
@@ -328,7 +478,7 @@ fn groups<'a>(
     let mut result = BTreeMap::<String, Vec<&FileResult>>::new();
     for file in files
         .iter()
-        .filter(|file| !excluded_paths.contains(&file.path))
+        .filter(|file| file.is_target && !excluded_paths.contains(&file.path))
     {
         result
             .entry(normalize_path(&file.path, &file.path_match_ranges))
@@ -627,143 +777,6 @@ fn changed(
     }
 }
 
-fn compare_regions(old: &Side, new: &Side) -> (RegionComparison, Vec<String>) {
-    if old.content.is_none() || new.content.is_none() {
-        return (
-            RegionComparison {
-                available: false,
-                old_regions: 0,
-                new_regions: 0,
-                paired_regions: 0,
-                old_only_regions: 0,
-                new_only_regions: 0,
-                regions: Vec::new(),
-            },
-            vec!["Source text is unavailable on at least one side; shared-context regions could not be compared.".to_owned()],
-        );
-    }
-    let old_regions = region_lines(old);
-    let new_regions = region_lines(new);
-    let old_normalized = old_regions
-        .iter()
-        .map(|region| region.2.clone())
-        .collect::<Vec<_>>();
-    let new_normalized = new_regions
-        .iter()
-        .map(|region| region.2.clone())
-        .collect::<Vec<_>>();
-    let pairs = lcs(&old_normalized, &new_normalized);
-    let mut regions = Vec::new();
-    let mut paired = 0;
-    let (mut old_start, mut new_start) = (0, 0);
-    for (old_end, new_end) in pairs
-        .into_iter()
-        .chain(std::iter::once((old_regions.len(), new_regions.len())))
-    {
-        let modified = (old_end - old_start).min(new_end - new_start);
-        for offset in 0..modified {
-            let old_region = &old_regions[old_start + offset];
-            let new_region = &new_regions[new_start + offset];
-            regions.push(RegionDiff {
-                old_line: Some(old_region.0),
-                new_line: Some(new_region.0),
-                old_text: Some(old_region.1.clone()),
-                new_text: Some(new_region.1.clone()),
-                classification: DiffClassification::Substantive,
-            });
-        }
-        paired += modified;
-        for old_region in old_regions.iter().take(old_end).skip(old_start + modified) {
-            regions.push(RegionDiff {
-                old_line: Some(old_region.0),
-                new_line: None,
-                old_text: Some(old_region.1.clone()),
-                new_text: None,
-                classification: DiffClassification::Substantive,
-            });
-        }
-        for new_region in new_regions.iter().take(new_end).skip(new_start + modified) {
-            regions.push(RegionDiff {
-                old_line: None,
-                new_line: Some(new_region.0),
-                old_text: None,
-                new_text: Some(new_region.1.clone()),
-                classification: DiffClassification::Substantive,
-            });
-        }
-        if old_end < old_regions.len() {
-            let old_region = &old_regions[old_end];
-            let new_region = &new_regions[new_end];
-            regions.push(RegionDiff {
-                old_line: Some(old_region.0),
-                new_line: Some(new_region.0),
-                old_text: Some(old_region.1.clone()),
-                new_text: Some(new_region.1.clone()),
-                classification: if old_region.1 == new_region.1 {
-                    DiffClassification::Unchanged
-                } else {
-                    DiffClassification::RenameEquivalent
-                },
-            });
-            paired += 1;
-        }
-        old_start = old_end + 1;
-        new_start = new_end + 1;
-    }
-    (
-        RegionComparison {
-            available: true,
-            old_regions: old_regions.len(),
-            new_regions: new_regions.len(),
-            paired_regions: paired,
-            old_only_regions: old_regions.len() - paired,
-            new_only_regions: new_regions.len() - paired,
-            regions,
-        },
-        Vec::new(),
-    )
-}
-
-fn region_lines(side: &Side) -> Vec<(u64, String, String)> {
-    let (Some(content), Some(normalized)) = (side.content.as_deref(), normalized(side)) else {
-        return Vec::new();
-    };
-    let original = lines(content);
-    let normalized = lines(&normalized);
-    let ranges = side
-        .matches
-        .iter()
-        .filter_map(|item| {
-            let index = item.line.saturating_sub(1) as usize;
-            (index < original.len())
-                .then_some((index.saturating_sub(1), (index + 2).min(original.len())))
-        })
-        .collect::<Vec<_>>();
-    merge_regions(ranges)
-        .into_iter()
-        .filter_map(|(start, end)| {
-            Some((
-                (start + 1) as u64,
-                original.get(start..end)?.join("\n"),
-                normalized.get(start..end)?.join("\n"),
-            ))
-        })
-        .collect()
-}
-
-fn merge_regions(mut ranges: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
-    ranges.sort_unstable();
-    let mut result: Vec<(usize, usize)> = Vec::new();
-    for (start, end) in ranges {
-        if let Some(last) = result.last_mut().filter(|last| start <= last.1) {
-            last.1 = last.1.max(end);
-        } else {
-            result.push((start, end));
-        }
-    }
-    result
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -813,6 +826,71 @@ mod tests {
                 start_column: start as u64 + 1,
                 end_column: (start + name.len()) as u64 + 1,
             }],
+        }
+    }
+
+    fn test_file(path: &str, content: &str, name: &str, is_target: bool) -> (FileResult, Match) {
+        let content_start = content.find(name).unwrap();
+        let line_start = content[..content_start]
+            .rfind('\n')
+            .map_or(0, |index| index + 1);
+        let line = content[..content_start].matches('\n').count() as u64 + 1;
+        let (component_index, path_start) = path
+            .split('/')
+            .enumerate()
+            .find_map(|(index, component)| {
+                component
+                    .to_lowercase()
+                    .find(&name.to_lowercase())
+                    .map(|start| (index, start))
+            })
+            .unwrap_or((path.split('/').count() - 1, 0));
+        (
+            FileResult {
+                path: path.to_owned(),
+                match_count: 1,
+                is_target,
+                path_match_ranges: is_target
+                    .then(|| PathMatch {
+                        component_index,
+                        start: path_start,
+                        end: path_start + name.len(),
+                    })
+                    .into_iter()
+                    .collect(),
+                content: Some(content.to_owned()),
+            },
+            Match {
+                file: path.to_owned(),
+                line,
+                column: (content_start - line_start + 1) as u64,
+                end_column: (content_start - line_start + name.len() + 1) as u64,
+                text: content.lines().nth(line as usize - 1).unwrap().to_owned(),
+            },
+        )
+    }
+
+    fn test_report(regex: &str, files: Vec<(FileResult, Match)>) -> Report {
+        let (files, matches): (Vec<_>, Vec<_>) = files.into_iter().unzip();
+        Report {
+            report_type: "topo_map".to_owned(),
+            format_version: crate::FORMAT_VERSION,
+            metadata: crate::Metadata {
+                workspace_directory: "/repo".to_owned(),
+                repository_root: "/repo".to_owned(),
+                scan_directory: "/repo".to_owned(),
+                regex: regex.to_owned(),
+                mode: crate::MapMode::All,
+                searched_at_unix_seconds: 1,
+                matcher: "ripgrep".to_owned(),
+                file_selection: "git".to_owned(),
+                tracked_file_count: files.len(),
+                git_revision: None,
+                git_dirty: None,
+            },
+            matches,
+            files,
+            graph: crate::Graph { nodes: Vec::new() },
         }
     }
 
@@ -894,51 +972,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_regions_coalesce_overlapping_match_context() {
-        let mut side = test_side("shared.rb", "Old\nsecond Old\nthird\n", "Old");
-        side.matches.push(Match {
-            file: "shared.rb".to_owned(),
-            line: 2,
-            column: 8,
-            end_column: 11,
-            text: "second Old".to_owned(),
-        });
-        side.content_normalization_ranges.push(ContentRange {
-            start_byte: 11,
-            end_byte: 14,
-            line: 2,
-            start_column: 8,
-            end_column: 11,
-        });
-        assert_eq!(region_lines(&side).len(), 1);
-    }
-
-    #[test]
-    fn shared_regions_pair_structural_modifications() {
-        let old = test_side("shared.rb", "Old\nafter old\n", "Old");
-        let new = test_side("shared.rb", "New\nafter new\n", "New");
-        let (comparison, warnings) = compare_regions(&old, &new);
-        assert!(warnings.is_empty());
-        assert_eq!(comparison.paired_regions, 1);
-        assert_eq!(comparison.old_only_regions, 0);
-        assert_eq!(comparison.new_only_regions, 0);
-        assert_eq!(
-            comparison.regions[0].classification,
-            DiffClassification::Substantive
-        );
-    }
-
-    #[test]
-    fn missing_shared_source_is_explicitly_unavailable() {
-        let mut old = test_side("shared.rb", "Old", "Old");
-        old.content = None;
-        let (comparison, warnings) = compare_regions(&old, &test_side("shared.rb", "New", "New"));
-        assert!(!comparison.available);
-        assert!(!warnings.is_empty());
-    }
-
-    #[test]
-    fn physical_path_identity_precedes_logical_path_grouping() {
+    fn shared_sprinkle_paths_are_not_correlations() {
         fn report(regex: &str, file: FileResult) -> Report {
             Report {
                 report_type: "topo_map".to_owned(),
@@ -986,8 +1020,130 @@ mod tests {
             },
         );
         let entries = correlate(&old, &new);
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn identical_target_paths_are_not_correlations() {
+        let path = "lib/legacy_replacement.rb";
+        let old = test_report(
+            "Legacy",
+            vec![test_file(path, "Legacy Replacement\n", "Legacy", true)],
+        );
+        let new = test_report(
+            "Replacement",
+            vec![test_file(path, "Legacy Replacement\n", "Replacement", true)],
+        );
+
+        assert!(correlate(&old, &new).is_empty());
+    }
+
+    #[test]
+    fn fuzzy_pairing_matches_unique_similar_path_targets() {
+        let old_content =
+            "module LegacyWidget\n  def create\n    shared_one\n    shared_two\n  end\nend\n";
+        let new_content = "module ReplacementV2Widget\n  def create\n    shared_one\n    shared_two\n    new_detail\n  end\nend\n";
+        let old = test_report(
+            "Legacy",
+            vec![test_file(
+                "lib/legacy_widget/creator.rb",
+                old_content,
+                "Legacy",
+                true,
+            )],
+        );
+        let new = test_report(
+            "Replacement",
+            vec![test_file(
+                "lib/replacement_v2_widget/creator.rb",
+                new_content,
+                "Replacement",
+                true,
+            )],
+        );
+        let old_path = normalize_path(&old.files[0].path, &old.files[0].path_match_ranges)
+            .replace(SENTINEL, "");
+        let new_path = normalize_path(&new.files[0].path, &new.files[0].path_match_ranges)
+            .replace(SENTINEL, "");
+        assert!(
+            fuzzy_paths_compatible(&old.files[0], &new.files[0]),
+            "{} <> {} = {}",
+            old_path,
+            new_path,
+            string_similarity(&old_path, &new_path)
+        );
+        assert!(
+            source_similarity(&side(&old.files[0], &old), &side(&new.files[0], &new)).unwrap()
+                >= MIN_FUZZY_SOURCE_SIMILARITY
+        );
+
+        let entries = correlate(&old, &new);
+
         assert_eq!(entries.len(), 1);
-        assert!(matches!(entries[0], Entry::SharedContext { .. }));
+        let Entry::FilePair {
+            classification,
+            old,
+            new,
+            warnings,
+            ..
+        } = &entries[0];
+        assert_eq!(*classification, Classification::Paired);
+        assert_eq!(old[0].path, "lib/legacy_widget/creator.rb");
+        assert_eq!(new[0].path, "lib/replacement_v2_widget/creator.rb");
+        assert!(warnings[0].contains("Paired by source similarity"));
+    }
+
+    #[test]
+    fn fuzzy_pairing_ignores_shared_sprinkles() {
+        let legacy_content =
+            "module LegacyWidget\n  def create\n    shared_one\n    shared_two\n  end\nend\n";
+        let replacement_content = "module ReplacementV2Widget\n  def create\n    shared_one\n    shared_two\n    LegacyFallback.call\n  end\nend\n";
+        let old = test_report(
+            "Legacy",
+            vec![
+                test_file(
+                    "lib/legacy_widget/creator.rb",
+                    legacy_content,
+                    "Legacy",
+                    true,
+                ),
+                test_file(
+                    "lib/replacement_v2_widget/creator.rb",
+                    replacement_content,
+                    "Legacy",
+                    false,
+                ),
+            ],
+        );
+        let new = test_report(
+            "Replacement",
+            vec![test_file(
+                "lib/replacement_v2_widget/creator.rb",
+                replacement_content,
+                "Replacement",
+                true,
+            )],
+        );
+
+        let entries = correlate(&old, &new);
+
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(
+            &entries[0],
+            Entry::FilePair {
+                classification: Classification::Paired,
+                old,
+                new,
+                ..
+            } if old[0].path == "lib/legacy_widget/creator.rb"
+                && new[0].path == "lib/replacement_v2_widget/creator.rb"
+        ));
+    }
+
+    #[test]
+    fn fuzzy_pairing_rejects_tied_candidates() {
+        let scores = vec![(0, 0, 0.8), (0, 1, 0.8)];
+        assert_eq!(unique_best(&scores, 0, true), None);
     }
 
     #[test]

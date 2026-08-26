@@ -1333,19 +1333,19 @@ mod tests {
     #[test]
     fn map_modes_select_targets_and_sprinkles() {
         let content_matches = BTreeMap::from([
-            ("airwallex_client.rb".to_owned(), 3),
-            ("payments_service.rb".to_owned(), 2),
+            ("legacy_client.rb".to_owned(), 3),
+            ("shared_service.rb".to_owned(), 2),
         ]);
         let targets = BTreeSet::from([
-            "airwallex_client.rb".to_owned(),
-            "airwallex_webhook.rb".to_owned(),
+            "legacy_client.rb".to_owned(),
+            "legacy_listener.rb".to_owned(),
         ]);
 
         let all = select_files(MapMode::All, content_matches.clone(), &targets);
         assert_eq!(all.len(), 3);
-        assert_eq!(all["airwallex_client.rb"].match_count, 3);
-        assert!(all["airwallex_client.rb"].is_target);
-        assert_eq!(all["airwallex_webhook.rb"].match_count, 0);
+        assert_eq!(all["legacy_client.rb"].match_count, 3);
+        assert!(all["legacy_client.rb"].is_target);
+        assert_eq!(all["legacy_listener.rb"].match_count, 0);
 
         let paths = select_files(MapMode::Paths, content_matches.clone(), &targets);
         assert_eq!(paths.len(), 2);
@@ -1358,7 +1358,7 @@ mod tests {
 
         let sprinkles = select_files(MapMode::Sprinkles, content_matches, &targets);
         assert_eq!(sprinkles.len(), 1);
-        assert_eq!(sprinkles["payments_service.rb"].match_count, 2);
+        assert_eq!(sprinkles["shared_service.rb"].match_count, 2);
     }
 
     #[test]
@@ -1405,18 +1405,18 @@ mod tests {
     fn matching_directory_targets_every_descendant_file() {
         let targets = find_path_targets(
             &[
-                PathBuf::from("packs/payments/app/client.rb"),
-                PathBuf::from("packs/payments/lib/worker.rb"),
+                PathBuf::from("packs/catalog/app/client.rb"),
+                PathBuf::from("packs/catalog/lib/worker.rb"),
                 PathBuf::from("packs/hr/app/employee.rb"),
             ],
-            &Regex::new("payments").unwrap(),
+            &Regex::new("catalog").unwrap(),
         );
 
         assert_eq!(
             targets,
             BTreeSet::from([
-                "packs/payments/app/client.rb".to_owned(),
-                "packs/payments/lib/worker.rb".to_owned(),
+                "packs/catalog/app/client.rb".to_owned(),
+                "packs/catalog/lib/worker.rb".to_owned(),
             ])
         );
     }
@@ -1426,30 +1426,30 @@ mod tests {
         let graph = Graph {
             nodes: vec![
                 Node {
-                    id: "file:packs/payments/app/client.rb".to_owned(),
+                    id: "file:packs/catalog/app/client.rb".to_owned(),
                     kind: "file".to_owned(),
-                    label: "packs/payments/app/client.rb".to_owned(),
+                    label: "packs/catalog/app/client.rb".to_owned(),
                     match_count: Some(1),
                     is_target: true,
                 },
                 Node {
-                    id: "file:packs/payments/lib/helper.rb".to_owned(),
+                    id: "file:packs/catalog/lib/helper.rb".to_owned(),
                     kind: "file".to_owned(),
-                    label: "packs/payments/lib/helper.rb".to_owned(),
+                    label: "packs/catalog/lib/helper.rb".to_owned(),
                     match_count: Some(1),
                     is_target: false,
                 },
                 Node {
-                    id: "file:packs/payments/root.rb".to_owned(),
+                    id: "file:packs/catalog/root.rb".to_owned(),
                     kind: "file".to_owned(),
-                    label: "packs/payments/root.rb".to_owned(),
+                    label: "packs/catalog/root.rb".to_owned(),
                     match_count: Some(1),
                     is_target: false,
                 },
                 Node {
-                    id: "file:packs/payments/extra/deep/worker.rb".to_owned(),
+                    id: "file:packs/catalog/extra/deep/worker.rb".to_owned(),
                     kind: "file".to_owned(),
-                    label: "packs/payments/extra/deep/worker.rb".to_owned(),
+                    label: "packs/catalog/extra/deep/worker.rb".to_owned(),
                     match_count: Some(1),
                     is_target: false,
                 },
@@ -1465,7 +1465,7 @@ mod tests {
 
         let diagram = mermaid(&graph, MapMode::All);
         assert!(!diagram.contains("subgraph D0[\"packs\"]"));
-        assert!(diagram.contains("subgraph D0[\"packs/payments\"]"));
+        assert!(diagram.contains("subgraph D0[\"packs/catalog\"]"));
         assert!(diagram.contains("subgraph D1[\"app\"]"));
         assert!(diagram.contains("subgraph D2[\"extra/deep\"]"));
         assert!(diagram.contains("subgraph D3[\"lib\"]"));

@@ -87,6 +87,8 @@ const VIEWER_HTML: &str = r##"<!doctype html>
     .children { margin-left: 14px; border-left: 1px solid #283244; padding-left: 8px; }
     .file { display: flex; width: 100%; min-height: 36px; gap: 8px; align-items: center; padding: 5px 7px; color: var(--text); border: 1px solid transparent; border-radius: 5px; background: transparent; text-align: left; cursor: pointer; }
     .file:hover, .file.selected { padding-top: 4px; padding-bottom: 4px; background: var(--panel-raised); border-color: var(--line); }
+    .file-label { min-width: 0; }
+    .correlation-paths { display: block; max-width: 100%; margin-top: 2px; overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
     .path-match { padding: 0; color: #fde68a; background: transparent; font-weight: 700; }
     .file .count { display: inline-flex; min-width: 24px; height: 24px; align-items: center; justify-content: center; margin-left: auto; padding: 0 7px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; background: var(--bg); font-size: 12px; }
     .file .count.zero { color: #fde68a; border-color: #a16207; background: var(--target-bg); }
@@ -112,6 +114,10 @@ const VIEWER_HTML: &str = r##"<!doctype html>
     .side-paths { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 14px 0; }
     .side-path { min-width: 0; padding: 9px 11px; overflow-wrap: anywhere; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); }
     .side-path b { display: block; margin-bottom: 3px; color: var(--muted); font-size: 11px; text-transform: uppercase; }
+    .correlation-sources { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 22px; }
+    .correlation-source { min-width: 0; }
+    .correlation-source h3 { margin: 0 0 8px; color: var(--muted); font-size: 12px; text-transform: uppercase; }
+    .correlation-source .source, .correlation-source .source-unavailable { margin-top: 0; }
     .diff { margin-top: 18px; overflow: hidden; border: 1px solid var(--line); border-radius: 7px; background: #0d131d; }
     .diff-line { display: grid; grid-template-columns: 48px 48px minmax(0, 1fr) minmax(0, 1fr); border-left: 3px solid transparent; }
     .diff-line + .diff-line { border-top: 1px solid rgba(48,59,79,.45); }
@@ -123,7 +129,7 @@ const VIEWER_HTML: &str = r##"<!doctype html>
     .diff-line.rename-equivalent { border-left-color: var(--renamed); background: rgba(196,181,253,.10); }
     .rename-toggle { margin-top: 14px; padding: 6px 9px; color: var(--renamed); border: 1px solid #6d5a9b; border-radius: 5px; background: rgba(196,181,253,.08); cursor: pointer; }
     @media (max-width: 1100px) { .topbar { flex-direction: column; } .stats { width: 100%; justify-content: flex-start; } main { height: calc(100vh - 170px); } }
-    @media (max-width: 800px) { main { grid-template-columns: 1fr; height: auto; } aside { max-height: 52vh; border-bottom: 1px solid var(--line); } .resize-handle { display: none; } section.detail { min-height: 48vh; } .side-paths { grid-template-columns: 1fr; } .diff-line { grid-template-columns: 38px 38px minmax(0, 1fr); } .diff-line code + code { grid-column: 3; border-top: 1px dashed var(--line); } }
+    @media (max-width: 800px) { main { grid-template-columns: 1fr; height: auto; } aside { max-height: 52vh; border-bottom: 1px solid var(--line); } .resize-handle { display: none; } section.detail { min-height: 48vh; } .side-paths, .correlation-sources { grid-template-columns: 1fr; } .diff-line { grid-template-columns: 38px 38px minmax(0, 1fr); } .diff-line code + code { grid-column: 3; border-top: 1px dashed var(--line); } }
   </style>
 </head>
 <body>
@@ -447,12 +453,14 @@ const VIEWER_HTML: &str = r##"<!doctype html>
       const root = { name: '', path: '', dirs: new Map(), files: [] };
       for (const file of files) {
         const parts = file.path.split('/');
-        const filename = parts.pop();
+        const displayParts = (file.display_path || file.path).split('/');
+        const filename = displayParts.pop();
+        parts.pop();
         let current = root;
         for (const [componentIndex, part] of parts.entries()) {
           if (!current.dirs.has(part)) {
             current.dirs.set(part, {
-              name: part,
+              name: displayParts[componentIndex],
               path: current.path ? `${current.path}/${part}` : part,
               matchRanges: pathMatchRanges(file, componentIndex),
               dirs: new Map(),
@@ -485,7 +493,8 @@ const VIEWER_HTML: &str = r##"<!doctype html>
 
     function matchesFilter(file) {
       const { text, hitRestrictions } = state.filterSpec;
-      if (text && !file.path.toLowerCase().includes(text)) return false;
+      const searchablePaths = [file.display_path || file.path, ...(file.search_paths || [])].join('\n').toLowerCase();
+      if (text && !searchablePaths.includes(text)) return false;
       if (!hitRestrictions.every(restriction => matchesHitRestriction(file.match_count, restriction))) return false;
       if (state.report.report_type === 'topo_correlation') {
         if (state.filter === 'paths') return file.classification === 'paired';
@@ -524,7 +533,7 @@ const VIEWER_HTML: &str = r##"<!doctype html>
     }
 
     function filenameFor(file) {
-      return file.filename || file.path.split('/').pop();
+      return file.filename || (file.display_path || file.path).split('/').pop();
     }
 
     function classificationLabel(classification) {
@@ -552,7 +561,47 @@ const VIEWER_HTML: &str = r##"<!doctype html>
     }
 
     function renderPath(file) {
-      return file.path.split('/').map((component, componentIndex) => renderPathComponent(component, pathMatchRanges(file, componentIndex))).join('<span class="path-separator">/</span>');
+      return (file.display_path || file.path).split('/').map((component, componentIndex) => renderPathComponent(component, pathMatchRanges(file, componentIndex))).join('<span class="path-separator">/</span>');
+    }
+
+    function correlationLabelFor(value) {
+      if (value === value.toUpperCase()) return 'CORRELATION';
+      if (value === value.toLowerCase()) return 'correlation';
+      if (value[0] === value[0].toUpperCase() && value.slice(1) === value.slice(1).toLowerCase()) return 'Correlation';
+      return 'Correlation';
+    }
+
+    function correlationDisplay(entry) {
+      const sides = [...(Array.isArray(entry.old) ? entry.old : [entry.old]), ...(Array.isArray(entry.new) ? entry.new : [entry.new])].filter(Boolean);
+      const source = sides[0];
+      if (['old_only', 'new_only'].includes(entry.classification) && source) {
+        return { path: source.path, pathMatchRanges: source.path_match_ranges || [] };
+      }
+      const sourceComponents = source ? source.path.split('/') : [];
+      const sentinel = state.report.sentinel || '{CORRELATION}';
+      const pathMatchRanges = [];
+      const components = entry.path.split('/').map((component, componentIndex) => {
+        const sourceCharacters = Array.from(sourceComponents[componentIndex] || '');
+        const sourceRanges = (source?.path_match_ranges || []).filter(range => range.component_index === componentIndex).sort((left, right) => left.start - right.start);
+        let rendered = '';
+        let position = 0;
+        let matchIndex = 0;
+        while (true) {
+          const sentinelIndex = component.indexOf(sentinel, position);
+          if (sentinelIndex < 0) break;
+          rendered += component.slice(position, sentinelIndex);
+          const sourceRange = sourceRanges[matchIndex];
+          const sourceMatch = sourceRange ? sourceCharacters.slice(sourceRange.start, sourceRange.end).join('') : '';
+          const label = correlationLabelFor(sourceMatch || 'Correlation');
+          const start = Array.from(rendered).length;
+          rendered += label;
+          pathMatchRanges.push({ component_index: componentIndex, start, end: start + Array.from(label).length });
+          position = sentinelIndex + sentinel.length;
+          matchIndex += 1;
+        }
+        return rendered + component.slice(position);
+      });
+      return { path: components.join('/'), pathMatchRanges };
     }
 
     function renderTreeNode(node) {
@@ -564,7 +613,10 @@ const VIEWER_HTML: &str = r##"<!doctype html>
         const target = file.is_target ? ' target' : '';
         const count = state.report.report_type === 'topo_correlation' ? classificationLabel(file.classification) : (file.match_count ? number(file.match_count) : 'target');
         const zero = file.match_count || state.report.report_type === 'topo_correlation' ? '' : ' zero';
-        return `<button class="file${target}${selected}" data-path="${escapeHtml(file.path)}"><span>${renderFilename(file)}</span><span class="count${zero}">${count}</span></button>`;
+        const correlationPaths = file.classification === 'paired' && file.old_paths?.length && file.new_paths?.length
+          ? `<small class="correlation-paths" title="${escapeHtml(`${file.old_paths.join(', ')} → ${file.new_paths.join(', ')}`)}">${escapeHtml(`${file.old_paths.join(', ')} → ${file.new_paths.join(', ')}`)}</small>`
+          : '';
+        return `<button class="file${target}${selected}" data-path="${escapeHtml(file.path)}"><span class="file-label">${renderFilename(file)}${correlationPaths}</span><span class="count${zero}">${count}</span></button>`;
       }).join('');
       if (!node.name) return `<div class="tree-root">${children}</div>`;
       const open = state.expanded.has(node.path) ? ' open' : '';
@@ -599,7 +651,7 @@ const VIEWER_HTML: &str = r##"<!doctype html>
       return lines.map(escapeHtml);
     }
 
-    function renderSource(file, matches) {
+    function renderSource(file, matches, rangePrefix = '') {
       const lines = sourceLines(file);
       if (!lines) return '<p class="source-unavailable">Source text is unavailable for this file.</p>';
       const matchesByLine = new Map();
@@ -631,7 +683,7 @@ const VIEWER_HTML: &str = r##"<!doctype html>
         const start = line;
         while (line <= lines.length && !visibleLines.has(line)) line += 1;
         const end = line - 1;
-        const range = `${file.path}:${start}-${end}`;
+        const range = `${rangePrefix}${file.path}:${start}-${end}`;
         if (state.expandedSourceRanges.has(range)) {
           for (let expanded = start; expanded <= end; expanded += 1) {
             rendered.push(`<div class="code-line" data-source-line="${expanded}"><span class="line-number">${expanded}</span><code>${lines[expanded - 1] || ' '}</code></div>`);
@@ -729,6 +781,18 @@ const VIEWER_HTML: &str = r##"<!doctype html>
       return warnings.map(warning => `<div class="warning">${escapeHtml(warning)}</div>`).join('');
     }
 
+    function renderCorrelationSources(entry) {
+      const sources = [];
+      for (const [sideName, sides] of [['Old', entry.old], ['New', entry.new]]) {
+        const files = (Array.isArray(sides) ? sides : [sides]).filter(Boolean);
+        files.forEach((file, index) => {
+          const label = files.length > 1 ? `${sideName} file ${index + 1}` : `${sideName} file`;
+          sources.push(`<div class="correlation-source"><h3>${label}</h3>${renderSource(file, file.matches || [], `${sideName}:${index}:`)}</div>`);
+        });
+      }
+      return `<div class="correlation-sources">${sources.join('')}</div>`;
+    }
+
     function renderDiffLine(line) {
       const className = line.kind.replace('_', '-');
       const oldText = line.old_text == null ? '' : escapeHtml(line.old_text);
@@ -736,25 +800,13 @@ const VIEWER_HTML: &str = r##"<!doctype html>
       return `<div class="diff-line ${className}"><span>${line.old_line || ''}</span><span>${line.new_line || ''}</span><code>${oldText || ' '}</code><code>${newText || ' '}</code></div>`;
     }
 
-    function renderCorrelationDetail(entry) {
+    function renderCorrelationDetail(entry, file) {
+      const heading = `<h2>${renderPath(file)}</h2>`;
       const badges = `<div class="badges"><span class="badge target">${escapeHtml(classificationLabel(entry.classification))}</span><span class="badge">${escapeHtml(entry.entry_type.replace('_', ' '))}</span></div>`;
       const warnings = [...(state.report.compatibility.warnings || []), ...(entry.warnings || [])];
-      if (entry.entry_type === 'shared_context') {
-        const comparison = entry.region_comparison;
-        if (!comparison.available) {
-          return `<h2>${escapeHtml(entry.path)}</h2>${badges}${sidePaths(entry)}${renderWarnings(warnings)}<p class="source-unavailable">Shared-context comparison is unavailable because source evidence is missing.</p>`;
-        }
-        const expanded = state.expandedRenamePaths.has(entry.path);
-        const renamed = comparison.regions.filter(region => region.classification === 'rename_equivalent');
-        const lines = comparison.regions.filter(region => region.classification !== 'unchanged' && (expanded || region.classification !== 'rename_equivalent')).map(region => renderDiffLine({
-          kind: region.classification === 'rename_equivalent' ? 'rename_equivalent' : (region.old_line && region.new_line ? 'modification' : region.old_line ? 'deletion' : 'addition'),
-          old_line: region.old_line, new_line: region.new_line, old_text: region.old_text, new_text: region.new_text,
-        })).join('');
-        const toggle = renamed.length ? `<button class="rename-toggle" type="button" data-rename-toggle>${expanded ? 'Hide' : 'Show'} ${number(renamed.length)} rename-equivalent ${renamed.length === 1 ? 'region' : 'regions'}</button>` : '';
-        return `<h2>${escapeHtml(entry.path)}</h2>${badges}${sidePaths(entry)}${renderWarnings(warnings)}<p class="path">Matched-region coverage: ${number(comparison.paired_regions)} paired, ${number(comparison.old_only_regions)} old-only, ${number(comparison.new_only_regions)} new-only. Surrounding file text is intentionally not diffed.</p>${toggle}${lines ? `<div class="diff">${lines}</div>` : '<p class="source-unavailable">No substantive matched-region differences.</p>'}`;
-      }
+      const sources = renderCorrelationSources(entry);
       if (!entry.smart_diff) {
-        return `<h2>${escapeHtml(entry.path)}</h2>${badges}${sidePaths(entry)}${renderWarnings(warnings)}<p class="source-unavailable">No diff is computed for unmatched or ambiguous entries. Original evidence is embedded in the report.</p>`;
+        return `${heading}${badges}${sidePaths(entry)}${renderWarnings(warnings)}${sources}`;
       }
       const expanded = state.expandedRenamePaths.has(entry.path);
       const substantive = entry.smart_diff.lines.filter(line => !['unchanged', 'rename_equivalent'].includes(line.kind));
@@ -762,7 +814,17 @@ const VIEWER_HTML: &str = r##"<!doctype html>
       const visible = expanded ? entry.smart_diff.lines.filter(line => line.kind !== 'unchanged') : substantive;
       const toggle = renamed.length ? `<button class="rename-toggle" type="button" data-rename-toggle>${expanded ? 'Hide' : 'Show'} ${number(renamed.length)} rename-equivalent ${renamed.length === 1 ? 'line' : 'lines'}</button>` : '';
       const diff = visible.length ? `<div class="diff">${visible.map(renderDiffLine).join('')}</div>` : '<p class="source-unavailable">No substantive differences. Unchanged and rename-equivalent lines are hidden by default.</p>';
-      return `<h2>${escapeHtml(entry.path)}</h2>${badges}${sidePaths(entry)}${renderWarnings(warnings)}<p class="path">Smart diff: ${escapeHtml(entry.smart_diff.classification.replace('_', ' '))}. Original text and line numbers are preserved.</p>${toggle}${diff}`;
+      return `${heading}${badges}${sidePaths(entry)}${renderWarnings(warnings)}<p class="path">Smart diff: ${escapeHtml(entry.smart_diff.classification.replace('_', ' '))}. Original text and line numbers are preserved.</p>${toggle}${diff}${sources}`;
+    }
+
+    function setupSourceControls(detail) {
+      highlightInlineMatches(detail);
+      detail.querySelectorAll('.code-gap').forEach(button => button.addEventListener('click', () => {
+        const anchor = sourceAnchorForGap(button);
+        state.expandedSourceRanges.add(button.dataset.sourceRange);
+        renderDetail();
+        restoreSourceAnchor(detail, anchor);
+      }));
     }
 
     function renderDetail() {
@@ -775,25 +837,20 @@ const VIEWER_HTML: &str = r##"<!doctype html>
       }
       if (state.report.report_type === 'topo_correlation') {
         const entry = state.report.entries.find(candidate => candidate.path === state.selected);
-        detail.innerHTML = renderCorrelationDetail(entry);
+        detail.innerHTML = renderCorrelationDetail(entry, file);
         detail.querySelector('[data-rename-toggle]')?.addEventListener('click', () => {
           if (state.expandedRenamePaths.has(entry.path)) state.expandedRenamePaths.delete(entry.path);
           else state.expandedRenamePaths.add(entry.path);
           renderDetail();
         });
+        setupSourceControls(detail);
         return;
       }
       const matches = byFile.get(file.path) || [];
       const target = file.is_target ? '<span class="badge target">path match</span>' : '<span class="badge">content match</span>';
       const count = `<span class="badge">${number(file.match_count)} content hits</span>`;
       detail.innerHTML = `<h2>${renderFilename(file)}</h2><div class="path">${renderPath(file)}</div><div class="badges">${target}${count}</div>${renderSource(file, matches)}`;
-      highlightInlineMatches(detail);
-      detail.querySelectorAll('.code-gap').forEach(button => button.addEventListener('click', () => {
-        const anchor = sourceAnchorForGap(button);
-        state.expandedSourceRanges.add(button.dataset.sourceRange);
-        renderDetail();
-        restoreSourceAnchor(detail, anchor);
-      }));
+      setupSourceControls(detail);
     }
 
     function renderHeader() {
@@ -854,13 +911,24 @@ const VIEWER_HTML: &str = r##"<!doctype html>
         });
         if (state.report.report_type === 'topo_correlation') {
           state.report.metadata = state.report.old_report.metadata;
-          state.report.files = state.report.entries.map(entry => ({
-            path: entry.path,
-            classification: entry.classification,
-            match_count: [...(Array.isArray(entry.old) ? entry.old : [entry.old]), ...(Array.isArray(entry.new) ? entry.new : [entry.new])].filter(Boolean).reduce((sum, side) => sum + side.matches.length, 0),
-            is_target: entry.classification === 'paired',
-            path_match_ranges: [],
-          }));
+          state.report.entries = state.report.entries.filter(entry => entry.entry_type === 'file_pair');
+          state.report.files = state.report.entries.map(entry => {
+            const display = correlationDisplay(entry);
+            const oldPaths = (Array.isArray(entry.old) ? entry.old : [entry.old]).filter(Boolean).map(side => side.path);
+            const newPaths = (Array.isArray(entry.new) ? entry.new : [entry.new]).filter(Boolean).map(side => side.path);
+            return {
+              path: entry.path,
+              display_path: display.path,
+              classification: entry.classification,
+              entry_type: entry.entry_type,
+              old_paths: oldPaths,
+              new_paths: newPaths,
+              search_paths: [...oldPaths, ...newPaths],
+              match_count: [...(Array.isArray(entry.old) ? entry.old : [entry.old]), ...(Array.isArray(entry.new) ? entry.new : [entry.new])].filter(Boolean).reduce((sum, side) => sum + side.matches.length, 0),
+              is_target: entry.classification === 'paired',
+              path_match_ranges: display.pathMatchRanges,
+            };
+          });
           const labels = { paths: 'Paired', content: 'Unmatched', sprinkles: 'Ambiguous' };
           document.querySelectorAll('.filter[data-filter]').forEach(button => { if (labels[button.dataset.filter]) button.textContent = labels[button.dataset.filter]; });
         }
@@ -970,38 +1038,60 @@ fn add_highlighted_lines(report: &mut Value) {
     else {
         return;
     };
-    let Some(files) = report.get_mut("files").and_then(Value::as_array_mut) else {
+    if let Some(files) = report.get_mut("files").and_then(Value::as_array_mut) {
+        for file in files {
+            add_highlighted_file(file, &syntax_set, theme);
+        }
+    }
+    if let Some(entries) = report.get_mut("entries").and_then(Value::as_array_mut) {
+        for entry in entries {
+            for side_name in ["old", "new"] {
+                let Some(side) = entry.get_mut(side_name) else {
+                    continue;
+                };
+                if let Some(files) = side.as_array_mut() {
+                    for file in files {
+                        add_highlighted_file(file, &syntax_set, theme);
+                    }
+                } else {
+                    add_highlighted_file(side, &syntax_set, theme);
+                }
+            }
+        }
+    }
+}
+
+fn add_highlighted_file(
+    file: &mut Value,
+    syntax_set: &SyntaxSet,
+    theme: &syntect::highlighting::Theme,
+) {
+    let Some(file_object) = file.as_object_mut() else {
         return;
     };
-
-    for file in files {
-        let Some(file_object) = file.as_object_mut() else {
-            continue;
-        };
-        let Some(path) = file_object
-            .get("path")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-        else {
-            continue;
-        };
-        let Some(content) = file_object
-            .get("content")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-        else {
-            continue;
-        };
-        file_object.insert(
-            "highlighted_lines".to_owned(),
-            Value::Array(
-                highlighted_lines(&content, &path, &syntax_set, theme)
-                    .into_iter()
-                    .map(Value::String)
-                    .collect(),
-            ),
-        );
-    }
+    let Some(path) = file_object
+        .get("path")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+    else {
+        return;
+    };
+    let Some(content) = file_object
+        .get("content")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+    else {
+        return;
+    };
+    file_object.insert(
+        "highlighted_lines".to_owned(),
+        Value::Array(
+            highlighted_lines(&content, &path, syntax_set, theme)
+                .into_iter()
+                .map(Value::String)
+                .collect(),
+        ),
+    );
 }
 
 fn highlighted_lines(
@@ -1152,6 +1242,27 @@ mod tests {
     }
 
     #[test]
+    fn viewer_adds_highlighted_lines_to_correlation_sides() {
+        let mut report = serde_json::json!({
+            "entries": [{
+                "old": {
+                    "path": "app/old_report.rb",
+                    "content": "class OldReport\nend\n"
+                },
+                "new": [{
+                    "path": "app/new_report.rb",
+                    "content": "class NewReport\nend\n"
+                }]
+            }]
+        });
+
+        add_highlighted_lines(&mut report);
+
+        assert!(report["entries"][0]["old"]["highlighted_lines"].is_array());
+        assert!(report["entries"][0]["new"][0]["highlighted_lines"].is_array());
+    }
+
+    #[test]
     fn viewer_dispatches_legacy_maps_and_correlation_reports() {
         assert!(validate_report(&serde_json::json!({ "format_version": 7 })).is_ok());
         assert!(
@@ -1170,8 +1281,20 @@ mod tests {
                 .contains(r"['old_only', 'new_only'].includes(classification) ? '\u00a0' : ' '")
         );
         assert!(VIEWER_HTML.contains("classificationLabel(file.classification)"));
-        assert!(VIEWER_HTML.contains("classificationLabel(entry.classification)"));
+        assert!(
+            VIEWER_HTML
+                .contains("if (['old_only', 'new_only'].includes(entry.classification) && source)")
+        );
+        assert!(VIEWER_HTML.contains("search_paths: [...oldPaths, ...newPaths]"));
+        assert!(VIEWER_HTML.contains("class=\"correlation-paths\""));
         assert!(VIEWER_HTML.contains("expandedRenamePaths"));
-        assert!(VIEWER_HTML.contains("shared_context"));
+        assert!(
+            VIEWER_HTML.contains(
+                "state.report.entries = state.report.entries.filter(entry => entry.entry_type === 'file_pair')"
+            )
+        );
+        assert!(VIEWER_HTML.contains("renderCorrelationSources"));
+        assert!(VIEWER_HTML.contains("setupSourceControls"));
+        assert!(!VIEWER_HTML.contains("Surrounding file text is intentionally not diffed"));
     }
 }
