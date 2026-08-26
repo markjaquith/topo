@@ -447,12 +447,14 @@ const VIEWER_HTML: &str = r##"<!doctype html>
       const root = { name: '', path: '', dirs: new Map(), files: [] };
       for (const file of files) {
         const parts = file.path.split('/');
-        const filename = parts.pop();
+        const displayParts = (file.display_path || file.path).split('/');
+        const filename = displayParts.pop();
+        parts.pop();
         let current = root;
         for (const [componentIndex, part] of parts.entries()) {
           if (!current.dirs.has(part)) {
             current.dirs.set(part, {
-              name: part,
+              name: displayParts[componentIndex],
               path: current.path ? `${current.path}/${part}` : part,
               matchRanges: pathMatchRanges(file, componentIndex),
               dirs: new Map(),
@@ -548,6 +550,43 @@ const VIEWER_HTML: &str = r##"<!doctype html>
 
     function renderPath(file) {
       return file.path.split('/').map((component, componentIndex) => renderPathComponent(component, pathMatchRanges(file, componentIndex))).join('<span class="path-separator">/</span>');
+    }
+
+    function correlationLabelFor(value) {
+      if (value === value.toUpperCase()) return 'CORRELATION';
+      if (value === value.toLowerCase()) return 'correlation';
+      if (value[0] === value[0].toUpperCase() && value.slice(1) === value.slice(1).toLowerCase()) return 'Correlation';
+      return 'Correlation';
+    }
+
+    function correlationDisplay(entry) {
+      const sides = [...(Array.isArray(entry.old) ? entry.old : [entry.old]), ...(Array.isArray(entry.new) ? entry.new : [entry.new])].filter(Boolean);
+      const source = sides[0];
+      const sourceComponents = source ? source.path.split('/') : [];
+      const sentinel = state.report.sentinel || '{CORRELATION}';
+      const pathMatchRanges = [];
+      const components = entry.path.split('/').map((component, componentIndex) => {
+        const sourceCharacters = Array.from(sourceComponents[componentIndex] || '');
+        const sourceRanges = (source?.path_match_ranges || []).filter(range => range.component_index === componentIndex).sort((left, right) => left.start - right.start);
+        let rendered = '';
+        let position = 0;
+        let matchIndex = 0;
+        while (true) {
+          const sentinelIndex = component.indexOf(sentinel, position);
+          if (sentinelIndex < 0) break;
+          rendered += component.slice(position, sentinelIndex);
+          const sourceRange = sourceRanges[matchIndex];
+          const sourceMatch = sourceRange ? sourceCharacters.slice(sourceRange.start, sourceRange.end).join('') : '';
+          const label = correlationLabelFor(sourceMatch || 'Correlation');
+          const start = Array.from(rendered).length;
+          rendered += label;
+          pathMatchRanges.push({ component_index: componentIndex, start, end: start + Array.from(label).length });
+          position = sentinelIndex + sentinel.length;
+          matchIndex += 1;
+        }
+        return rendered + component.slice(position);
+      });
+      return { path: components.join('/'), pathMatchRanges };
     }
 
     function renderTreeNode(node) {
@@ -849,13 +888,17 @@ const VIEWER_HTML: &str = r##"<!doctype html>
         });
         if (state.report.report_type === 'topo_correlation') {
           state.report.metadata = state.report.old_report.metadata;
-          state.report.files = state.report.entries.map(entry => ({
-            path: entry.path,
-            classification: entry.classification,
-            match_count: [...(Array.isArray(entry.old) ? entry.old : [entry.old]), ...(Array.isArray(entry.new) ? entry.new : [entry.new])].filter(Boolean).reduce((sum, side) => sum + side.matches.length, 0),
-            is_target: entry.classification === 'paired',
-            path_match_ranges: [],
-          }));
+          state.report.files = state.report.entries.map(entry => {
+            const display = correlationDisplay(entry);
+            return {
+              path: entry.path,
+              display_path: display.path,
+              classification: entry.classification,
+              match_count: [...(Array.isArray(entry.old) ? entry.old : [entry.old]), ...(Array.isArray(entry.new) ? entry.new : [entry.new])].filter(Boolean).reduce((sum, side) => sum + side.matches.length, 0),
+              is_target: entry.classification === 'paired',
+              path_match_ranges: display.pathMatchRanges,
+            };
+          });
           const labels = { paths: 'Paired', content: 'Unmatched', sprinkles: 'Ambiguous' };
           document.querySelectorAll('.filter[data-filter]').forEach(button => { if (labels[button.dataset.filter]) button.textContent = labels[button.dataset.filter]; });
         }
