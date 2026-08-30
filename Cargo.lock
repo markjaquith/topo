@@ -502,6 +502,7 @@ dependencies = [
  "serde_json",
  "syntect",
  "toml",
+ "usage-rs",
 ]
 
 [[package]]
@@ -509,6 +510,33 @@ name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[package]]
+name = "usage-argv"
+version = "6.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8cf8735c2d0154550e8241d30579e28b2840394c7a3efaf33b28ce706babe6f4"
+
+[[package]]
+name = "usage-derive"
+version = "6.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bfa7bc7653408788950770f2aa53f0600e025d50c8b049cdab054284436d2413"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "usage-rs"
+version = "6.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c12de82d13507fdafd64170f5f735bd5fa7778f94b1f4a55e3b66e8ea3bde301"
+dependencies = [
+ "usage-argv",
+ "usage-derive",
+]
 
 [[package]]
 name = "walkdir"

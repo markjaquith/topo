@@ -12,6 +12,7 @@ use ignore::gitignore::GitignoreBuilder;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use usage::{Args, Cli, Subcommands, ValueEnum};
 
 mod correlation;
 mod viewer;
@@ -19,50 +20,94 @@ mod viewer;
 const FORMAT_VERSION: u8 = 7;
 static STATUS_ACTIVE: AtomicBool = AtomicBool::new(false);
 
-#[derive(Debug)]
+/// Search Git-tracked code and write JSON and Mermaid topology maps.
+#[derive(Args, Debug)]
 struct Options {
+    /// Regex used to select paths and file contents.
+    #[usage(name = "regex")]
     pattern: Option<String>,
+
+    /// Write the JSON report to this filename.
+    #[usage(short = 'o', long, value_name = "FILENAME", value_hint = usage::ValueHint::AnyPath)]
     output: Option<PathBuf>,
+
+    /// Scan this directory instead of the configured directory.
+    #[usage(long = "dir", value_name = "DIRECTORY", value_hint = usage::ValueHint::DirPath)]
     scan_directory: Option<PathBuf>,
+
+    /// Select matching paths, contents, both, or only non-path content matches.
+    #[usage(long, value_enum)]
     mode: Option<MapMode>,
 }
 
-#[derive(Debug)]
+/// Browse a JSON map or correlation report.
+#[derive(Args, Debug)]
 struct ViewOptions {
+    /// JSON report to browse.
+    #[usage(value_name = "REPORT", value_hint = usage::ValueHint::FilePath)]
     report: PathBuf,
-    open_browser: bool,
+
+    /// Print the viewer URL without opening a browser.
+    #[usage(long)]
+    no_open: bool,
 }
 
-#[derive(Debug)]
+/// Compare two maps using their recorded match evidence.
+#[derive(Args, Debug)]
 struct CorrelateOptions {
+    /// Map made with the old implementation vocabulary.
+    #[usage(value_name = "OLD_REPORT", value_hint = usage::ValueHint::FilePath)]
     old_report: PathBuf,
+
+    /// Map made with the new implementation vocabulary.
+    #[usage(value_name = "NEW_REPORT", value_hint = usage::ValueHint::FilePath)]
     new_report: PathBuf,
+
+    /// Write the correlation report to this filename.
+    #[usage(short = 'o', long, value_name = "FILENAME", value_hint = usage::ValueHint::AnyPath)]
     output: PathBuf,
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+/// Code topology mapper with an interactive local viewer.
+///
+/// A workspace `topo.toml` can provide the default regex and scan directory.
+#[derive(Cli, Debug)]
+#[usage(
+    bin = "topo",
+    version,
+    disable_version_flag,
+    unknown_flags = "error",
+    args_override_self = false,
+    arg_required_else_help
+)]
+struct Topo {
+    /// Show version information.
+    #[usage(short = 'v', long, action = usage::ArgAction::Version)]
+    version: bool,
+
+    #[usage(subcommand)]
+    command: Commands,
+}
+
+#[derive(Debug, Subcommands)]
+enum Commands {
+    Map(Options),
+    Correlate(CorrelateOptions),
+    View(ViewOptions),
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
 #[serde(rename_all = "snake_case")]
 enum MapMode {
     #[default]
     All,
+    #[usage(alias = "filenames")]
     Paths,
     Contents,
     Sprinkles,
 }
 
 impl MapMode {
-    fn parse(value: &str) -> Result<Self, String> {
-        match value {
-            "all" => Ok(Self::All),
-            "paths" | "filenames" => Ok(Self::Paths),
-            "contents" => Ok(Self::Contents),
-            "sprinkles" => Ok(Self::Sprinkles),
-            _ => Err(format!(
-                "unknown mode `{value}`; expected all, paths, contents, or sprinkles"
-            )),
-        }
-    }
-
     fn searches_contents(self) -> bool {
         !matches!(self, Self::Paths)
     }
@@ -148,43 +193,11 @@ struct Node {
 }
 
 fn main() {
-    let arguments = env::args().skip(1).collect::<Vec<_>>();
-    if arguments.is_empty()
-        || matches!(arguments.first().map(String::as_str), Some("--help" | "-h"))
-    {
-        print!("{}", main_help());
-        return;
-    }
-    if matches!(
-        arguments.first().map(String::as_str),
-        Some("--version" | "-v")
-    ) {
-        print!("{}", version());
-        return;
-    }
-    if arguments.first().is_some_and(|argument| argument == "view")
-        && matches!(arguments.get(1).map(String::as_str), Some("--help" | "-h"))
-    {
-        print!("{}", view_help());
-        return;
-    }
-    if arguments
-        .first()
-        .is_some_and(|argument| argument == "correlate")
-        && matches!(arguments.get(1).map(String::as_str), Some("--help" | "-h"))
-    {
-        print!("{}", correlate_help());
-        return;
-    }
-    let result = if arguments.first().is_some_and(|argument| argument == "view") {
-        run_view(arguments)
-    } else if arguments
-        .first()
-        .is_some_and(|argument| argument == "correlate")
-    {
-        run_correlate(arguments)
-    } else {
-        run(arguments)
+    let topo = Topo::parse();
+    let result = match topo.command {
+        Commands::Map(options) => run(options),
+        Commands::Correlate(options) => run_correlate(options),
+        Commands::View(options) => run_view(options),
     };
     if let Err(error) = result {
         clear_status();
@@ -193,8 +206,7 @@ fn main() {
     }
 }
 
-fn run(arguments: Vec<String>) -> Result<(), String> {
-    let options = parse_args(arguments)?;
+fn run(options: Options) -> Result<(), String> {
     let workspace_directory = env::current_dir().map_err(|error| error.to_string())?;
     let workspace_config = load_workspace_config(&workspace_directory)?;
     let pattern = options
@@ -314,157 +326,18 @@ fn run(arguments: Vec<String>) -> Result<(), String> {
     Ok(())
 }
 
-fn run_view(arguments: Vec<String>) -> Result<(), String> {
-    let options = parse_view_args(arguments)?;
-    viewer::run(options.report, options.open_browser)
+fn run_view(options: ViewOptions) -> Result<(), String> {
+    viewer::run(options.report, !options.no_open)
 }
 
-fn run_correlate(arguments: Vec<String>) -> Result<(), String> {
-    let options = parse_correlate_args(arguments)?;
+fn run_correlate(options: CorrelateOptions) -> Result<(), String> {
     correlation::run(&options.old_report, &options.new_report, &options.output)?;
     println!("Correlation  {}", options.output.display());
     Ok(())
 }
 
-fn parse_correlate_args(args: Vec<String>) -> Result<CorrelateOptions, String> {
-    let mut args = args.into_iter();
-    if args.next().as_deref() != Some("correlate") {
-        return Err(correlate_usage());
-    }
-    let old_report = PathBuf::from(args.next().ok_or_else(correlate_usage)?);
-    let new_report = PathBuf::from(args.next().ok_or_else(correlate_usage)?);
-    let mut output = None;
-    while let Some(argument) = args.next() {
-        match argument.as_str() {
-            "--output" | "-o" => {
-                output = Some(PathBuf::from(
-                    args.next()
-                        .ok_or_else(|| "--output needs a filename".to_owned())?,
-                ));
-            }
-            _ => {
-                return Err(format!(
-                    "unexpected argument `{argument}`\n\n{}",
-                    correlate_usage()
-                ));
-            }
-        }
-    }
-    Ok(CorrelateOptions {
-        old_report,
-        new_report,
-        output: output.ok_or_else(|| "--output is required for correlation reports".to_owned())?,
-    })
-}
-
-fn parse_view_args(args: Vec<String>) -> Result<ViewOptions, String> {
-    let mut args = args.into_iter();
-    match args.next().as_deref() {
-        Some("view") => {}
-        _ => return Err(view_usage()),
-    }
-    let report = args.next().ok_or_else(view_usage)?;
-    let mut open_browser = true;
-    for argument in args {
-        match argument.as_str() {
-            "--no-open" => open_browser = false,
-            _ => {
-                return Err(format!(
-                    "unexpected argument `{argument}`\n\n{}",
-                    view_usage()
-                ));
-            }
-        }
-    }
-    Ok(ViewOptions {
-        report: PathBuf::from(report),
-        open_browser,
-    })
-}
-
-fn parse_args(args: Vec<String>) -> Result<Options, String> {
-    let mut args = args.into_iter();
-    match args.next().as_deref() {
-        Some("map") => {}
-        Some("--help") | Some("-h") | None => return Err(usage()),
-        Some(command) => return Err(format!("unknown command `{command}`\n\n{}", usage())),
-    }
-
-    let mut pattern = None;
-    let mut output = None;
-    let mut scan_directory = None;
-    let mut mode = None;
-    while let Some(argument) = args.next() {
-        match argument.as_str() {
-            "--output" | "-o" => {
-                let path = args
-                    .next()
-                    .ok_or_else(|| "--output needs a filename".to_owned())?;
-                output = Some(PathBuf::from(path));
-            }
-            "--dir" => {
-                let path = args
-                    .next()
-                    .ok_or_else(|| "--dir needs a directory".to_owned())?;
-                scan_directory = Some(PathBuf::from(path));
-            }
-            "--mode" => {
-                let value = args
-                    .next()
-                    .ok_or_else(|| "--mode needs a value".to_owned())?;
-                mode = Some(MapMode::parse(&value)?);
-            }
-            "--help" | "-h" => return Err(usage()),
-            _ if argument.starts_with('-') => {
-                return Err(format!("unexpected argument `{argument}`\n\n{}", usage()));
-            }
-            _ if pattern.is_none() => pattern = Some(argument),
-            _ => return Err(format!("unexpected argument `{argument}`\n\n{}", usage())),
-        }
-    }
-
-    Ok(Options {
-        pattern,
-        output,
-        scan_directory,
-        mode,
-    })
-}
-
-fn main_help() -> String {
-    format!(
-        "████████╗ ██████╗ ██████╗  ██████╗\n╚══██╔══╝██╔═══██╗██╔══██╗██╔═══██╗\n   ██║   ██║   ██║██████╔╝██║   ██║\n   ██║   ██║   ██║██╔═══╝ ██║   ██║\n   ██║   ╚██████╔╝██║     ╚██████╔╝\n   ╚═╝    ╚═════╝ ╚═╝      ╚═════╝\n\n  Code topology maps  •  v{}\n\nUSAGE\n  topo map [<regex>] [--dir <scan-directory>] [--mode <mode>] [--output <filename>]\n\nCOMMANDS\n  map       Search Git-tracked code and write JSON + Mermaid maps\n  correlate Compare two maps using their recorded match evidence\n  view      Browse a JSON map or correlation report\n\nWORKSPACE\n  topo map                 Use the pattern and directory in topo.toml\n  topo map 'UserService'   Override the configured regex\n\nOPTIONS\n  --mode <mode>            all (default), paths, contents, or sprinkles (`filenames` aliases paths)\n  -h, --help               Show this help\n  -v, --version            Show version\n",
-        env!("CARGO_PKG_VERSION")
-    )
-}
-
-fn version() -> String {
-    format!("topo {}\n", env!("CARGO_PKG_VERSION"))
-}
-
-fn view_help() -> String {
-    "Usage: topo view <report.topo.json> [--no-open]\n\nStart a local web viewer for a topo JSON report. The browser opens automatically; use --no-open to print the URL without opening it.\n".to_owned()
-}
-
-fn view_usage() -> String {
-    "Usage: topo view <report.topo.json> [--no-open]".to_owned()
-}
-
-fn correlate_help() -> String {
-    "Usage: topo correlate <old.topo.json> <new.topo.json> --output <report.topo-correlation.json>\n\nCompare compatible map reports using exact normalized paths and recorded content-match ranges.\n".to_owned()
-}
-
-fn correlate_usage() -> String {
-    "Usage: topo correlate <old.topo.json> <new.topo.json> --output <report.topo-correlation.json>"
-        .to_owned()
-}
-
 fn map_report_type() -> String {
     "topo_map".to_owned()
-}
-
-fn usage() -> String {
-    "Usage: topo map [<regex>] [--dir <scan-directory>] [--mode <mode>] [--output <filename>]\n\nMode is all (default), paths, contents, or sprinkles; `filenames` is an alias for paths. Use the current directory as the topo workspace. The regex and scan directory may come from topo.toml; CLI values override them. Apply .topoignore from the workspace and write a JSON graph report plus a Mermaid sidecar.".to_owned()
 }
 
 fn load_workspace_config(workspace_directory: &Path) -> Result<Option<WorkspaceConfig>, String> {
@@ -1195,43 +1068,58 @@ mod tests {
     use super::*;
 
     #[test]
-    fn main_help_introduces_topo() {
-        let help = main_help();
-        assert!(help.starts_with("████████╗"));
-        assert!(help.contains("Code topology maps"));
-        assert!(help.contains("topo map [<regex>]"));
-        assert!(help.contains("-v, --version"));
-    }
-
-    #[test]
-    fn version_uses_the_package_version() {
-        assert_eq!(version(), format!("topo {}\n", env!("CARGO_PKG_VERSION")));
-    }
-
-    #[test]
-    fn correlate_requires_two_inputs_and_explicit_output() {
-        let options = parse_correlate_args(vec![
-            "correlate".to_owned(),
-            "old.topo.json".to_owned(),
-            "new.topo.json".to_owned(),
-            "--output".to_owned(),
-            "result.topo-correlation.json".to_owned(),
+    fn usage_parser_builds_correlate_options() {
+        let topo = Topo::parse_from(&[
+            "correlate".as_ref(),
+            "old.topo.json".as_ref(),
+            "new.topo.json".as_ref(),
+            "--output".as_ref(),
+            "result.topo-correlation.json".as_ref(),
         ])
         .unwrap();
+        let Commands::Correlate(options) = topo.command else {
+            panic!("correlate command should be selected");
+        };
         assert_eq!(options.old_report, PathBuf::from("old.topo.json"));
         assert_eq!(options.new_report, PathBuf::from("new.topo.json"));
         assert_eq!(
             options.output,
             PathBuf::from("result.topo-correlation.json")
         );
+
         assert!(
-            parse_correlate_args(vec![
-                "correlate".to_owned(),
-                "old".to_owned(),
-                "new".to_owned()
+            Topo::parse_from(&[
+                "correlate".as_ref(),
+                "old.topo.json".as_ref(),
+                "new.topo.json".as_ref(),
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn usage_parser_preserves_map_mode_alias() {
+        let topo = Topo::parse_from(&[
+            "map".as_ref(),
+            "UserService".as_ref(),
+            "--mode".as_ref(),
+            "filenames".as_ref(),
+        ])
+        .unwrap();
+        let Commands::Map(options) = topo.command else {
+            panic!("map command should be selected");
+        };
+        assert_eq!(options.pattern.as_deref(), Some("UserService"));
+        assert_eq!(options.mode, Some(MapMode::Paths));
+    }
+
+    #[test]
+    fn usage_spec_contains_all_commands() {
+        let spec = Topo::to_kdl();
+        assert!(spec.contains("cmd map"), "{spec}");
+        assert!(spec.contains("cmd correlate"), "{spec}");
+        assert!(spec.contains("cmd view"), "{spec}");
+        assert!(spec.contains("alias filenames"), "{spec}");
     }
 
     #[test]
@@ -1326,8 +1214,17 @@ mod tests {
 
     #[test]
     fn paths_mode_replaces_filenames_with_a_compatibility_alias() {
-        assert_eq!(MapMode::parse("paths").unwrap(), MapMode::Paths);
-        assert_eq!(MapMode::parse("filenames").unwrap(), MapMode::Paths);
+        let topo = Topo::parse_from(&[
+            "map".as_ref(),
+            "Example".as_ref(),
+            "--mode".as_ref(),
+            "paths".as_ref(),
+        ])
+        .unwrap();
+        let Commands::Map(options) = topo.command else {
+            panic!("map command should be selected");
+        };
+        assert_eq!(options.mode, Some(MapMode::Paths));
     }
 
     #[test]
